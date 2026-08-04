@@ -177,7 +177,7 @@ def build_sector_features(
     if not rows:
         return pd.DataFrame()
     frame = pd.concat(rows, ignore_index=True)
-    return frame.replace([np.inf, -np.inf], np.nan).dropna(subset=["ret1", "ret5", "ret20", "excess1_next"])
+    return frame.replace([np.inf, -np.inf], np.nan).dropna(subset=["ret1", "ret5", "ret20", "excess1"])
 
 
 def build_stock_features(
@@ -264,7 +264,7 @@ def build_stock_features(
     out = out.dropna(
         subset=[
             "ret1", "ret5", "excess1", "excess5", "amount20",
-            "amt_ratio", "vol20", "close_loc", "ma20_dev", "turn5", "residual_next",
+            "amt_ratio", "vol20", "close_loc", "ma20_dev", "turn5",
         ]
     )
     return out

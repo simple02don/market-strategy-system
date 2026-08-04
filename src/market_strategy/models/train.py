@@ -77,6 +77,7 @@ def train_all(storage: Storage, trade_date: str) -> dict:
     stock[numeric] = stock[numeric].astype("float32")
 
     market = market.sort_values("date").reset_index(drop=True)
+    market = market.dropna(subset=["idx_ret1_next"])
     split = max(120, int(len(market) * 0.8))
     mkt_train = market.iloc[:split]
     mkt_val = market.iloc[split:]
@@ -128,6 +129,7 @@ def train_all(storage: Storage, trade_date: str) -> dict:
 
     # ---- 板块 LightGBM ----
     sector = sector.sort_values("date").reset_index(drop=True)
+    sector = sector.dropna(subset=["excess1_next"])
     sec_split = max(120, int(len(sector) * 0.8))
     sec_train = sector.iloc[:sec_split]
     sec_val = sector.iloc[sec_split:]
@@ -145,6 +147,7 @@ def train_all(storage: Storage, trade_date: str) -> dict:
 
     # ---- 个股 LightGBM + 校准 ----
     stock = stock.sort_values("date").reset_index(drop=True)
+    stock = stock.dropna(subset=["residual_next"])
     stk_split = max(200000, int(len(stock) * 0.8))
     stk_train = stock.iloc[:stk_split]
     stk_val = stock.iloc[stk_split:]
