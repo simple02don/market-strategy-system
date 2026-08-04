@@ -20,6 +20,7 @@ from .providers.tushare_provider import TushareProvider
 from .push.wecom import WeComPusher
 from .report import generate_report
 from .storage import Storage
+from .timeutil import now_cst, now_str
 
 
 def _git_commit() -> str:
@@ -39,7 +40,7 @@ def _git_commit() -> str:
 
 
 def _dataset_version(trade_date: str, label: str) -> str:
-    return f"{label}_{trade_date}_{datetime.now():%Y%m%d%H%M%S}"
+    return f"{label}_{trade_date}_{now_cst():%Y%m%d%H%M%S}"
 
 
 class NightlyPipeline:
@@ -147,8 +148,8 @@ class NightlyPipeline:
         next_day_str = next_day.strftime("%Y%m%d")
         latest_str = latest_td.strftime("%Y%m%d")
         run_id = self.storage.start_run("nightly", next_day_str)
-        decision_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        information_cutoff = f"{datetime.now():%Y-%m-%d %H:%M:%S}"
+        decision_time = now_str()
+        information_cutoff = now_str()
         dataset_version = _dataset_version(latest_str, "nightly")
         model_version = "rule_v1"
         try:

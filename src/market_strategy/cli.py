@@ -13,6 +13,7 @@ from .models.train import train_all
 from .pipeline import NightlyPipeline
 from .providers.tushare_provider import TushareProvider
 from .storage import Storage
+from .timeutil import now_cst
 
 
 def _fmt(value) -> str:
@@ -23,7 +24,7 @@ def cmd_check_calendar(args) -> int:
     with Storage() as storage:
         provider = TushareProvider()
         cal = TradingCalendar(storage, provider)
-        today = datetime.now().date()
+        today = now_cst().date()
         tomorrow = today + timedelta(days=1)
         next_day = cal.next_trading_day(today)
         should_run, run_day = cal.should_run_tonight()
@@ -44,7 +45,7 @@ def cmd_check_calendar(args) -> int:
 
 
 def cmd_data_backfill(args) -> int:
-    end = args.trade_date or datetime.now().date().strftime("%Y%m%d")
+    end = args.trade_date or now_cst().date().strftime("%Y%m%d")
     with NightlyPipeline() as pipe:
         result = pipe.backfill(end, years=args.years)
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -53,14 +54,14 @@ def cmd_data_backfill(args) -> int:
 
 def cmd_data_update(args) -> int:
     with NightlyPipeline() as pipe:
-        result = pipe.update_market_data(args.trade_date or datetime.now().date().strftime("%Y%m%d"))
+        result = pipe.update_market_data(args.trade_date or now_cst().date().strftime("%Y%m%d"))
         print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 
 def cmd_nightly(args) -> int:
     with NightlyPipeline() as pipe:
-        now = datetime.now()
+        now = now_cst()
         today = now.date()
         if args.trade_date:
             next_day = datetime.strptime(args.trade_date, "%Y%m%d").date()
@@ -94,7 +95,7 @@ def cmd_nightly(args) -> int:
 
 def cmd_train(args) -> int:
     with Storage() as storage:
-        result = train_all(storage, args.trade_date or datetime.now().date().strftime("%Y%m%d"))
+        result = train_all(storage, args.trade_date or now_cst().date().strftime("%Y%m%d"))
         print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

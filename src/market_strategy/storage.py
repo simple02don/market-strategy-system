@@ -7,14 +7,14 @@ dataset_version，供回测与线上推断使用同一规则重放。
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 from . import config
+from .timeutil import now_str
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+_now = now_str
 
 
 SCHEMA = """

@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta
 
 from .providers.tushare_provider import TushareProvider
 from .storage import Storage
+from .timeutil import now_cst
 
 
 def _parse_day(value: str | date | datetime) -> date:
@@ -27,7 +28,7 @@ class TradingCalendar:
 
     def refresh(self, start: str = "20190101", end: str | None = None) -> int:
         """从 Tushare 拉取并覆盖缓存交易日历，返回新增行数。"""
-        end = end or (datetime.now().date() + timedelta(days=30)).strftime("%Y%m%d")
+        end = end or (now_cst().date() + timedelta(days=30)).strftime("%Y%m%d")
         rows = self.provider.trade_cal(start=start, end=end)
         return self.storage.upsert_trade_cal(rows)
 
@@ -71,7 +72,7 @@ class TradingCalendar:
 
     def should_run_tonight(self, now: datetime | None = None) -> tuple[bool, date | None]:
         """23:00 调度判定：下一自然日为交易日则运行。"""
-        now = now or datetime.now()
+        now = now or now_cst()
         if isinstance(now, date) and not isinstance(now, datetime):
             now = datetime.combine(now, datetime.min.time())
         tomorrow = now.date() + timedelta(days=1)
