@@ -8,7 +8,9 @@ if [ "${EUID}" -eq 0 ]; then
 fi
 
 MARKER="# market-strategy-system"
-NIGHTLY_ARGS="${NIGHTLY_ARGS:---no-push}"
+if [ -z "${NIGHTLY_ARGS+x}" ]; then
+  NIGHTLY_ARGS="--no-push"
+fi
 TMP="$(mktemp)"
 crontab -l 2>/dev/null | grep -v -F "$MARKER" | grep -v -F "$DIR/run.sh" > "$TMP" || true
 cat >> "$TMP" <<EOF
