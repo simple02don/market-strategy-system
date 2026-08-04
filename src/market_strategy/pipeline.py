@@ -11,8 +11,19 @@ import pandas as pd
 
 from . import config
 from .calendar import TradingCalendar
+from .features.materialize import (
+    build_market_features,
+    build_sector_features,
+    build_stock_features,
+)
 from .features.market import market_context
 from .models import build_scenarios, classify_market_state, rank_sectors, rank_stocks
+from .models.inference import (
+    infer_market,
+    infer_sectors,
+    infer_stocks,
+    load_models,
+)
 from .nlp.facts import extract_facts
 from .providers.news_sources import NewsCollector
 from .providers.shared_cache import SharedCacheReader
@@ -157,6 +168,7 @@ class NightlyPipeline:
             self.update_market_data(latest_str)
             result = self._compose(next_day_str, latest_str, dataset_version, model_version)
             payload = result["payload"]
+            model_version = payload.get("model_version", model_version)
             payload.update(
                 {
                     "run_id": run_id,
@@ -229,6 +241,38 @@ class NightlyPipeline:
             latest_str,
             industry_excess=industry_excess,
         )
+        model_version_effective = "rule_v1"
+        models = load_models()
+        if models:
+            market_last = build_market_features(self.storage, latest_str, days=90)
+            if not market_last.empty:
+                state, scenarios = infer_market(
+                    models,
+                    market_last.iloc[-1].to_dict(),
+                    state,
+                )
+                model_version_effective = state.get("model_version", "rule_v1")
+            sector_last = build_sector_features(self.storage, latest_str, days=90)
+            sector_last = (
+                sector_last[sector_last["date"] == latest_str].to_dict("records")
+                if not sector_last.empty
+                else []
+            )
+            if sector_last:
+                sectors = infer_sectors(models, sector_last, sectors)
+            stock_last = build_stock_features(
+                self.storage,
+                latest_str,
+                days=90,
+                min_amount=0,
+            )
+            stock_last = (
+                stock_last[stock_last["date"] == latest_str].to_dict("records")
+                if not stock_last.empty
+                else []
+            )
+            if stock_last:
+                candidates = infer_stocks(models, stock_last, candidates)
         news = self._collect_news(latest_str, next_day_str)
         facts = extract_facts(self.storage, news["items"], model_version="deepseek_fact_v1")
         facts_summary = self._facts_summary()
@@ -250,8 +294,9 @@ class NightlyPipeline:
                 "bars": int(len(bars)),
                 "shared_cache": news["shared"],
                 "dataset_version": dataset_version,
-                "model_version": model_version,
+                "model_version": model_version_effective,
             },
+            "model_version": model_version_effective,
             "summary": f"市场{state.get('label')}；下一交易日{next_day_str}；"
             f"{len(candidates)} 只候选进入观察。",
         }
