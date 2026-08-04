@@ -1,8 +1,8 @@
 # A股主力策略情景推演与分层选股系统 · 接手文件
 
 > 最后核验时间：2026-08-05 01:30
-> GitHub（目标）：`simple02don/market-strategy-system`（私有；Codex GitHub App
->  尚需在该仓库授权 Contents 写权限后才能推送）
+> GitHub：`simple02don/market-strategy-system`（私有；2026-08-05 已通过本机 SSH
+>  公钥 `~/.ssh/github_simple02don_ed25519` 推送成功，smoke CI 通过）
 > 生产：`root@43.136.54.243:/home/ubuntu/market-strategy-system`（ubuntu 运行）
 
 ## 1. 系统定位
@@ -59,7 +59,7 @@ cd /home/ubuntu/market-strategy-system
 
 ## 6. 待办
 
-- GitHub 推送：Codex 桌面端重新连接 GitHub App 以签发含新仓库权限的 token，之后推送代码并启用 CI。
+- GitHub 已就绪（SSH 公钥推送 + smoke CI）；后续发布沿用“本地提交 → GitHub → 服务器 rsync 部署”。
 - 市场方向模型改进（当前 Brier 劣于无条件基线，暂不作为主决策依据）。
 - 组合成本后净值跟踪：连续样本窗口验证个股 RankIC 是否能转化为可执行收益。
 - 降级状态机（facts_only/abstain）细节完善与告警分级。
