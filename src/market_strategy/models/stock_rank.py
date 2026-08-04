@@ -71,7 +71,8 @@ def rank_stocks(
         )
     )
 
-    merged["circ_mv"] = pd.to_numeric(merged["circ_mv"], errors="coerce") / 1e8
+    # Tushare daily_basic 的 circ_mv 单位为万元，换算为亿元
+    merged["circ_mv"] = pd.to_numeric(merged["circ_mv"], errors="coerce") / 1e4
     merged["pe_ttm"] = pd.to_numeric(merged["pe_ttm"], errors="coerce")
     merged["pct_chg"] = pd.to_numeric(merged["pct_chg"], errors="coerce")
     merged["amount"] = pd.to_numeric(merged["amount"], errors="coerce")
