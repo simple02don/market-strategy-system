@@ -53,8 +53,13 @@ def rank_stocks(
     history = bars[bars["trade_date"] <= trade_date].copy()
     amounts = history.pivot_table(index="ts_code", columns="trade_date", values="amount")
     closes = history.pivot_table(index="ts_code", columns="trade_date", values="close")
+    # Tushare daily.amount 单位为千元，统一换算为元
     merged["amount_20d"] = merged["ts_code"].map(
-        lambda code: float(amounts.loc[code].tail(20).mean()) if code in amounts.index else np.nan
+        lambda code: (
+            float(amounts.loc[code].tail(20).mean()) * 1000
+            if code in amounts.index
+            else np.nan
+        )
     )
     merged["ret_5d"] = merged["ts_code"].map(
         lambda code: (
@@ -75,7 +80,7 @@ def rank_stocks(
     merged["circ_mv"] = pd.to_numeric(merged["circ_mv"], errors="coerce") / 1e4
     merged["pe_ttm"] = pd.to_numeric(merged["pe_ttm"], errors="coerce")
     merged["pct_chg"] = pd.to_numeric(merged["pct_chg"], errors="coerce")
-    merged["amount"] = pd.to_numeric(merged["amount"], errors="coerce")
+    merged["amount"] = pd.to_numeric(merged["amount"], errors="coerce") * 1000
     merged["turnover_rate"] = pd.to_numeric(merged["turnover_rate"], errors="coerce")
     limit_up = np.where(merged["symbol"].str.startswith("30"), 19.8, 9.8)
     merged["limit_up_break"] = merged["pct_chg"] >= limit_up - 0.2
