@@ -244,7 +244,11 @@ def build_stock_features(
                 "close_loc": close_loc[date_col].values,
                 "ma20_dev": ma20_dev[date_col].values,
                 "high60_dev": high60_dev[date_col].values,
-                "turn5": turn5[date_col].values if date_col in turn5.columns else np.nan,
+                "turn5": (
+                    turn5[date_col].reindex(codes).values
+                    if date_col in turn5.columns
+                    else np.full(len(codes), np.nan)
+                ),
                 "pe_ttm": pe[date_col].reindex(codes).values if date_col in pe.columns else np.nan,
                 "circ_mv": circ[date_col].reindex(codes).values if date_col in circ.columns else np.nan,
                 "residual_next": (pct[next_date] - industry_ret1[next_date]).values,
