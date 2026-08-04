@@ -10,6 +10,15 @@ import pandas as pd
 from ..storage import Storage
 
 
+def roll_cols(frame: pd.DataFrame, window: int, method: str) -> pd.DataFrame:
+    """按列（日期）滚动：pandas 3.0 已移除 rolling(axis=1)。"""
+    return getattr(frame.T.rolling(window), method)().T
+
+
+def shift_cols(frame: pd.DataFrame, periods: int = 1) -> pd.DataFrame:
+    return frame.T.shift(periods).T
+
+
 def _load_pivots(
     storage: Storage,
     start: str,
@@ -36,7 +45,7 @@ def _load_pivots(
     )
     if min_amount > 0:
         amounts = df.pivot_table(index="ts_code", columns="trade_date", values="amount")
-        liquid = amounts[amounts.rolling(20, axis=1).mean().iloc[:, -1] >= min_amount].index
+        liquid = amounts[roll_cols(amounts, 20, "mean").iloc[:, -1] >= min_amount].index
         df = df[df["ts_code"].isin(liquid)]
     closes = df.pivot_table(index="ts_code", columns="trade_date", values="close")
     opens = df.pivot_table(index="ts_code", columns="trade_date", values="open")
@@ -58,8 +67,10 @@ def _market_frame(
     adv = (pct > 0).mean(axis=0)
     limit_up = (pct >= 9.8).sum(axis=0) + (pct >= 19.8).sum(axis=0)
     limit_down = (pct <= -9.8).sum(axis=0) + (pct <= -19.8).sum(axis=0)
-    new_high = (closes >= closes.rolling(60, axis=1).max().shift(1, axis=1)).sum(axis=0)
-    new_low = (closes <= closes.rolling(60, axis=1).min().shift(1, axis=1)).sum(axis=0)
+    prev_high60 = shift_cols(roll_cols(closes, 60, "max"))
+    prev_low60 = shift_cols(roll_cols(closes, 60, "min"))
+    new_high = (closes >= prev_high60).sum(axis=0)
+    new_low = (closes <= prev_low60).sum(axis=0)
     idx_ret1 = index_close.pct_change() * 100
     frame = pd.DataFrame(
         {
@@ -129,8 +140,8 @@ def build_sector_features(
         pct.index.map(lambda code: industry.get(code, "未知"))
     ).value_counts()
     ret1 = pct_industry
-    ret5 = ret1.rolling(5, axis=1).sum()
-    ret20 = ret1.rolling(20, axis=1).sum()
+    ret5 = roll_cols(ret1, 5, "sum")
+    ret20 = roll_cols(ret1, 20, "sum")
     market_ret1 = ret1.mean(axis=0)
     rows = []
     for date_col in pct_industry.columns[60:]:
@@ -188,17 +199,17 @@ def build_stock_features(
     turn = basic.pivot_table(index="ts_code", columns="trade_date", values="turnover_rate")
 
     ret1 = pct
-    ret5 = pct.rolling(5, axis=1).sum()
-    ret20 = pct.rolling(20, axis=1).sum()
-    amount20 = amounts.rolling(20, axis=1).mean()
-    amt_ratio = amounts / (amount20.shift(1, axis=1) + 1e-9)
-    vol20 = pct.rolling(20, axis=1).std() * np.sqrt(252)
+    ret5 = roll_cols(pct, 5, "sum")
+    ret20 = roll_cols(pct, 20, "sum")
+    amount20 = roll_cols(amounts, 20, "mean")
+    amt_ratio = amounts / (shift_cols(amount20) + 1e-9)
+    vol20 = roll_cols(pct, 20, "std") * np.sqrt(252)
     close_loc = (closes - lows) / (highs - lows + 1e-9)
-    ma20 = closes.rolling(20, axis=1).mean()
+    ma20 = roll_cols(closes, 20, "mean")
     ma20_dev = (closes / ma20 - 1) * 100
-    high60 = closes.rolling(60, axis=1).max()
-    high60_dev = (closes / high60.shift(1, axis=1) - 1) * 100
-    turn5 = turn.rolling(5, axis=1).mean()
+    high60 = roll_cols(closes, 60, "max")
+    high60_dev = (closes / shift_cols(high60) - 1) * 100
+    turn5 = roll_cols(turn, 5, "mean")
 
     industry_ret1 = pct.copy()
     industry_ret1.index = pct.index.map(lambda code: industry.get(code, "未知"))
