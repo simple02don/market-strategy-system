@@ -103,17 +103,23 @@ def rank_stocks(
     if passed.empty:
         return []
 
-    industry_excess_series = passed["industry"].map(industry_excess).fillna(0.0)
+    def pct_rank(series: pd.Series) -> pd.Series:
+        return (series.rank(pct=True) * 100).fillna(50.0)
+
+    passed["pct_rank"] = pct_rank(passed["pct_chg"])
+    passed["ret5_rank"] = pct_rank(passed["ret_5d"])
+    passed["ret20_rank"] = pct_rank(passed["ret_20d"])
+    passed["sector_rank"] = pct_rank(passed["industry"].map(industry_excess))
+    passed["turn_rank"] = pct_rank(passed["turnover_rate"])
+    passed["amt_rank"] = pct_rank(passed["amount_20d"])
     passed["score"] = (
-        50.0
-        + passed["pct_chg"].fillna(0.0) * 6.0
-        + passed["ret_5d"].fillna(0.0) * 80.0
-        + passed["ret_20d"].fillna(0.0) * 20.0
-        + industry_excess_series * 60.0
-        - passed["turnover_rate"].fillna(0.0) * 1.2
-        - passed["amount_20d"].fillna(0.0) / 1e8 * 0.2
-    )
-    passed["score"] = passed["score"].clip(0, 100)
+        passed["ret5_rank"] * 0.25
+        + passed["ret20_rank"] * 0.15
+        + passed["pct_rank"] * 0.20
+        + passed["sector_rank"] * 0.20
+        + passed["amt_rank"] * 0.10
+        + (100.0 - passed["turn_rank"]) * 0.10
+    ).round(1)
     passed = passed.sort_values("score", ascending=False)
 
     out = []
