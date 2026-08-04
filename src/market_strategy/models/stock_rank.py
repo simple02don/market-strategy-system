@@ -37,7 +37,7 @@ def rank_stocks(
     stock_df["symbol"] = stock_df["ts_code"].str.split(".").str[0]
     stock_df = stock_df[
         ~stock_df["name"].map(_is_st)
-        & ~stock_df["symbol"].str.startswith(("688", "689", "8", "4"))
+        & ~stock_df["symbol"].str.startswith(("688", "689", "8", "4", "920"))
     ]
 
     today = bars[bars["trade_date"] == trade_date]

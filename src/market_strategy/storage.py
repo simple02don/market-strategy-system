@@ -244,7 +244,7 @@ class Storage:
         for row in rows:
             code = row["ts_code"]
             symbol = code.split(".")[0]
-            if symbol.startswith(("688", "689", "8", "4")):
+            if symbol.startswith(("688", "689", "8", "4", "920")):
                 continue
             if symbol.startswith("30") and not include_gem:
                 continue

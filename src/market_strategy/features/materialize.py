@@ -277,7 +277,7 @@ def build_stock_features(
         is_st = name.str.upper().str.contains("ST", na=False) | name.str.contains("退", na=False)
         out = out[
             ~is_st
-            & ~symbol.str.startswith(("688", "689", "8", "4"))
+            & ~symbol.str.startswith(("688", "689", "8", "4", "920"))
         ]
         symbol = out["ts_code"].str.split(".").str[0]
         limit = np.where(symbol.str.startswith("30"), 19.8, 9.8)
