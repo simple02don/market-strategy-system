@@ -188,11 +188,18 @@ def build_stock_features(
     end_date: str,
     days: int = 500,
     min_amount: float = 5e7,
+    executable_only: bool = True,
 ) -> pd.DataFrame:
     dates = _recent_dates(storage, end_date, days + 70)
     start = dates[0]
     closes, opens, highs, lows, amounts, pct = _load_pivots(storage, start, end_date, min_amount=min_amount)
     industry = _industry_map(storage)
+    names = {
+        str(row["ts_code"]): str(row["name"] or "")
+        for row in storage._conn.execute(
+            "SELECT ts_code, name FROM stock_basic WHERE list_status='L'"
+        ).fetchall()
+    }
     basic = pd.read_sql_query(
         "SELECT ts_code, trade_date, pe_ttm, circ_mv, turnover_rate FROM daily_basic WHERE trade_date BETWEEN ? AND ?",
         storage._conn,
@@ -264,6 +271,16 @@ def build_stock_features(
         return pd.DataFrame()
     out = pd.concat(rows, ignore_index=True)
     out = out.replace([np.inf, -np.inf], np.nan)
+    if executable_only:
+        symbol = out["ts_code"].str.split(".").str[0]
+        name = out["ts_code"].map(lambda code: names.get(code, ""))
+        is_st = name.str.upper().str.contains("ST", na=False) | name.str.contains("退", na=False)
+        out = out[
+            ~is_st
+            & ~symbol.str.startswith(("688", "689", "8", "4"))
+        ]
+        limit = np.where(symbol.str.startswith("30"), 19.8, 9.8)
+        out = out[out["ret1"] < limit - 0.2]
     out = out.dropna(
         subset=[
             "ret1", "ret5", "excess1", "excess5", "amount20",
