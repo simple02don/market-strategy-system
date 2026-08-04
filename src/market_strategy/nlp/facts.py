@@ -48,15 +48,18 @@ def _fetch_text(url: str, timeout: int = 15) -> str:
 
 
 def _llm_extract(document: str, client: OpenAI, model: str) -> list[dict]:
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": [
             {"role": "system", "content": "你只输出合法 JSON 数组。"},
             {"role": "user", "content": PROMPT + document},
         ],
-        temperature=0.0,
-        max_tokens=1800,
-    )
+        "temperature": 0.0,
+        "max_tokens": 1800,
+    }
+    if config.env_int("TAIL_AI_PRIMARY_DISABLE_THINKING", 0):
+        kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+    response = client.chat.completions.create(**kwargs)
     content = response.choices[0].message.content or ""
     content = re.sub(r"^```(?:json)?|```$", "", content.strip(), flags=re.M)
     parsed = json.loads(content)
