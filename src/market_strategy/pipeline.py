@@ -100,6 +100,7 @@ class NightlyPipeline:
     def backfill(self, end_date: str, years: int = 3) -> dict:
         start_date = (datetime.strptime(end_date, "%Y%m%d") - timedelta(days=365 * years)).strftime("%Y%m%d")
         self.calendar.refresh(start=start_date, end=end_date)
+        self.update_stock_pool(force=True)
         days = [
             str(row["cal_date"])
             for row in self.storage._conn.execute(
@@ -110,11 +111,29 @@ class NightlyPipeline:
         done = 0
         for day in days:
             try:
-                self.update_market_data(day)
+                version = _dataset_version(day, "backfill")
+                daily = self.provider.daily_by_date(day)
+                adj = {
+                    row["ts_code"]: row["adj_factor"]
+                    for row in self.provider.adj_factor_by_date(day)
+                }
+                for row in daily:
+                    row["adj_factor"] = adj.get(row["ts_code"])
+                    row["available_from"] = f"{day} 23:00:00"
+                basic = self.provider.daily_basic_by_date(day)
+                for row in basic:
+                    row["available_from"] = f"{day} 23:00:00"
+                self.storage.upsert_daily_bars(daily, version)
+                self.storage.upsert_daily_basic(basic, version)
                 done += 1
             except Exception as exc:  # noqa: BLE001
                 print(f"backfill {day} failed: {exc}")
-        return {"days": len(days), "done": done, "start": start_date, "end": end_date}
+        n_index = 0
+        for code in ("000001.SH", "399001.SZ", "399006.SZ", "000300.SH", "000905.SH", "000852.SH"):
+            n_index += self.storage.upsert_index_daily(
+                self.provider.index_daily(code, start_date, end_date)
+            )
+        return {"days": len(days), "done": done, "index_rows": n_index, "start": start_date, "end": end_date}
 
     # ---------- 夜间运行 ----------
     def run_nightly(
