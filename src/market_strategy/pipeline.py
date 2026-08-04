@@ -303,13 +303,17 @@ class NightlyPipeline:
         return {"payload": payload}
 
     def _load_bars(self, trade_date: str, days: int = 130) -> pd.DataFrame:
+        columns = [
+            "ts_code", "trade_date", "open", "high", "low", "close",
+            "pre_close", "pct_chg", "vol", "amount",
+        ]
         dates = pd.read_sql_query(
             "SELECT DISTINCT trade_date FROM daily_bar ORDER BY trade_date DESC LIMIT ?",
             self.storage._conn,
             params=(days + 5,),
         )["trade_date"].tolist()
         if trade_date not in dates:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=columns)
         start = dates[max(0, dates.index(trade_date) - days + 1)]
         return pd.read_sql_query(
             """

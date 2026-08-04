@@ -83,6 +83,12 @@ def cmd_nightly(args) -> int:
             if latest is None:
                 print(json.dumps({"status": "failed", "error": "no_latest_trade_day"}))
                 return 1
+            max_data = pipe.storage._conn.execute(
+                "SELECT MAX(trade_date) AS d FROM daily_bar"
+            ).fetchone()["d"]
+            if max_data and latest.strftime("%Y%m%d") > str(max_data):
+                # 午夜后当日数据尚未产生：以已有数据的最新交易日为准
+                latest = datetime.strptime(str(max_data), "%Y%m%d").date()
         result = pipe.run_nightly(
             next_day,
             latest,
