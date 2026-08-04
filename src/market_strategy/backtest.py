@@ -65,7 +65,6 @@ def run_backtest(
             {**_lgb_params(), "objective": "binary", "metric": "binary_logloss"},
             lgb.Dataset(x_train, label=y_train),
             num_boost_round=300,
-            callbacks=[lgb.early_stopping(40, verbose=False)],
         )
         pred = model.predict(x_test)
         result["market"] = {
@@ -85,7 +84,6 @@ def run_backtest(
             _lgb_params(),
             lgb.Dataset(sec_train[SECTOR_FEATURES].fillna(0.0), label=sec_train["excess1_next"]),
             num_boost_round=300,
-            callbacks=[lgb.early_stopping(40, verbose=False)],
         )
         pred = model.predict(sec_test[SECTOR_FEATURES].fillna(0.0))
         actual = sec_test["excess1_next"].values
@@ -103,7 +101,6 @@ def run_backtest(
             _lgb_params(),
             lgb.Dataset(stk_train[STOCK_FEATURES].fillna(0.0), label=stk_train["residual_next"]),
             num_boost_round=400,
-            callbacks=[lgb.early_stopping(50, verbose=False)],
         )
         x_test = stk_test[STOCK_FEATURES].fillna(0.0)
         pred = model.predict(x_test)
