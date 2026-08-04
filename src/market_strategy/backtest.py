@@ -25,8 +25,11 @@ from .timeutil import now_str
 
 def _split(frame: pd.DataFrame, test_days: int) -> tuple[pd.DataFrame, pd.DataFrame]:
     frame = frame.sort_values("date").reset_index(drop=True)
-    split = len(frame) - test_days
-    return frame.iloc[:split], frame.iloc[split:]
+    dates = frame["date"].unique()
+    if len(dates) <= test_days:
+        return pd.DataFrame(), frame
+    split_date = dates[-test_days - 1]
+    return frame[frame["date"] < split_date], frame[frame["date"] >= split_date]
 
 
 def run_backtest(
