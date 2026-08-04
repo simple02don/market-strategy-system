@@ -57,7 +57,7 @@ def _llm_extract(document: str, client: OpenAI, model: str) -> list[dict]:
         "temperature": 0.0,
         "max_tokens": 1800,
     }
-    if config.env_int("TAIL_AI_PRIMARY_DISABLE_THINKING", 0):
+    if config.env_int("TAIL_AI_PRIMARY_DISABLE_THINKING", 1):
         kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
     response = client.chat.completions.create(**kwargs)
     content = response.choices[0].message.content or ""
