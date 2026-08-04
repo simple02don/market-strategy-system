@@ -9,7 +9,11 @@ fi
 
 MARKER="# market-strategy-system"
 if [ -z "${NIGHTLY_ARGS+x}" ]; then
-  NIGHTLY_ARGS="--no-push"
+  EXISTING=$(crontab -l 2>/dev/null | grep -F "run.sh nightly" | head -1)
+  case "$EXISTING" in
+    *"--no-push"*) NIGHTLY_ARGS="--no-push" ;;
+    *) NIGHTLY_ARGS="" ;;
+  esac
 fi
 TMP="$(mktemp)"
 crontab -l 2>/dev/null | grep -v -F "$MARKER" | grep -v -F "$DIR/run.sh" > "$TMP" || true
