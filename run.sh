@@ -8,6 +8,11 @@ if [ "${EUID}" -eq 0 ] && id "$APP_USER" >/dev/null 2>&1; then
 fi
 
 cd "$DIR"
+if [ -f "$DIR/.env" ]; then
+  set -a
+  . "$DIR/.env"
+  set +a
+fi
 PY="${DIR}/venv/bin/python3"
 if [ ! -x "$PY" ]; then
   PY="${DIR}/.venv/bin/python3"
