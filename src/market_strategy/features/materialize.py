@@ -211,13 +211,10 @@ def build_stock_features(
     high60_dev = (closes / shift_cols(high60) - 1) * 100
     turn5 = roll_cols(turn, 5, "mean")
 
-    industry_ret1 = pct.copy()
-    industry_ret1.index = pct.index.map(lambda code: industry.get(code, "未知"))
-    industry_ret1 = industry_ret1.groupby(level=0).transform("mean")
+    industry_series = pct.index.map(lambda code: industry.get(code, "未知"))
+    industry_ret1 = pct.groupby(industry_series).transform("mean")
     excess1 = pct - industry_ret1
-    ret5_industry = ret5.copy()
-    ret5_industry.index = pct.index.map(lambda code: industry.get(code, "未知"))
-    ret5_industry = ret5_industry.groupby(level=0).transform("mean")
+    ret5_industry = ret5.groupby(industry_series).transform("mean")
     excess5 = ret5 - ret5_industry
 
     cols = closes.columns
