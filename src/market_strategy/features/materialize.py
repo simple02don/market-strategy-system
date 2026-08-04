@@ -45,7 +45,10 @@ def _load_pivots(
     )
     if min_amount > 0:
         amounts = df.pivot_table(index="ts_code", columns="trade_date", values="amount")
-        liquid = amounts[roll_cols(amounts, 20, "mean").iloc[:, -1] >= min_amount].index
+        # daily.amount 单位为千元；min_amount 参数单位为元
+        liquid = amounts[
+            roll_cols(amounts, 20, "mean").iloc[:, -1] >= min_amount / 1000
+        ].index
         df = df[df["ts_code"].isin(liquid)]
     closes = df.pivot_table(index="ts_code", columns="trade_date", values="close")
     opens = df.pivot_table(index="ts_code", columns="trade_date", values="open")
@@ -236,7 +239,7 @@ def build_stock_features(
                 "ret20": ret20[date_col].values,
                 "excess1": excess1[date_col].values,
                 "excess5": excess5[date_col].values,
-                "amount20": (amount20[date_col].values / 1e8),
+                "amount20": (amount20[date_col].values / 1e5),  # 千元 -> 亿元
                 "amt_ratio": amt_ratio[date_col].values,
                 "vol20": vol20[date_col].values,
                 "close_loc": close_loc[date_col].values,

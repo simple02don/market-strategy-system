@@ -1,0 +1,64 @@
+# A股主力策略情景推演与分层选股系统 · 接手文件
+
+> 最后核验时间：2026-08-04
+> GitHub（目标）：`simple02don/market-strategy-system`（私有；Codex GitHub App
+>  尚需在该仓库授权 Contents 写权限后才能推送）
+> 生产：`root@43.136.54.243:/home/ubuntu/market-strategy-system`（ubuntu 运行）
+
+## 1. 系统定位
+
+- 每日 23:00（仅“下一自然日为交易日”时）生成次日全景概率推演：市场状态 →
+  次日情景 → 板块职责 → 个股 0-3 主推荐，并通过企业微信推送。
+- 与 JCKX Tail Overnight 完全独立：不 import 其代码、不写其数据目录、不用其
+  锁名/cron。只读复用其事件缓存与分钟档案，且必须带版本校验和直连兜底。
+- 只读复用共享凭据：Tushare token、企业微信 webhook、JCKX 报告密码、DeepSeek key。
+- 只输出研究推演，不自动下单，不构成投资建议。
+
+## 2. 当前状态
+
+| 项目 | 状态 |
+|---|---|
+| 部署 | `/home/ubuntu/market-strategy-system`，venv 独立，`.env` 600 |
+| 调度 | 23:00 `nightly --no-push`（验收前不推送）；23:03 health；周六 02:00 train |
+| 数据 | Tushare 3 年回灌（725 交易日 / 390 万日线 / 390 万每日指标 / 指数），PIT 字段已建 |
+| 新闻/事实 | 财联社(Tushare)/巨潮/政府网/部委多源；DeepSeek 原子事实抽取可用 |
+| 模型 | 规则基线已跑通；HMM/LightGBM/校准训练管线已实现，首次训练验证中 |
+| 报告服务 | `127.0.0.1:8082`，nginx `/strategy/` 反代，JCKX 密码登录，WireGuard 内网 |
+| 原系统 | 未改动（nginx 仅新增 location，配置备份 `/root/nginx_jckx-reports.bak.20260804`） |
+
+## 3. 常用命令
+
+```bash
+cd /home/ubuntu/market-strategy-system
+./run.sh check-calendar        # 明天是否交易日、今晚是否运行
+./run.sh data-update --trade-date YYYYMMDD
+./run.sh nightly --no-push     # 生成报告不推送（自检）
+./run.sh train                 # 模型训练（周六自动）
+./run.sh health
+```
+
+## 4. 数据与模型
+
+- SQLite：`data/market_strategy.sqlite3`（交易日历/日线/每日指标/新闻/事实/预测日志）。
+- 模型产物：`models/artifacts/v{n}`（LightGBM txt + HMM/校准器 joblib + meta.json），
+  23:00 只加载最新版本推理；冠军/挑战者机制：样本外指标不劣于现有才替换。
+- 训练与推理分离：训练在低峰时段自动运行，不在 23:00 任务内训练。
+- 时间一律 Asia/Shanghai（`timeutil.now_cst`），报告记录 decision_time / information_cutoff /
+  dataset_version / model_version / code_commit。
+
+## 5. 关键约束
+
+- 免费数据源缺失/不兼容时必须回退自拉，共享只是优化不是依赖。
+- 数据失败推“失败说明”，进入降级/弃权，不静默。
+- 禁止为出票放低硬门槛（市值≥110亿、PE 0-300、主板+创业板、剔除 ST/科创板/
+  北交所/停牌/一字板/上市不足60日）。
+- 收假前夜运行必须纳入整个假期资讯窗口，并标注最近行情日陈旧天数。
+- 不打印 `.env`/token/webhook 正文。
+
+## 6. 待办
+
+- 首次模型训练验收（指标：市场 Brier、板块/个股 Rank IC）并切换 23:00 推送。
+- 回测框架（Walk-Forward + 基线对比 + 含成本模拟）。
+- 降级状态机（facts_only/abstain）与失败告警完善。
+- GitHub 推送权限（Codex App 授权新仓库）与 CI。
+- 候选次日相对收益跟踪（每交易日记录）。
