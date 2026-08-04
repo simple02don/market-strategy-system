@@ -167,11 +167,12 @@ def build_sector_features(
         )
         next_col = pct_industry.columns[pct_industry.columns.get_loc(date_col) + 1] if pct_industry.columns.get_loc(date_col) + 1 < len(pct_industry.columns) else None
         if next_col is None:
-            break
-        row["excess1_next"] = (
-            pct_industry[next_col].reindex(col.index).values
-            - market_ret1[next_col]
-        )
+            row["excess1_next"] = np.nan
+        else:
+            row["excess1_next"] = (
+                pct_industry[next_col].reindex(col.index).values
+                - market_ret1[next_col]
+            )
         rows.append(row)
     if not rows:
         return pd.DataFrame()
@@ -219,11 +220,11 @@ def build_stock_features(
 
     cols = closes.columns
     rows: list[pd.DataFrame] = []
-    for i in range(60, len(cols) - 1):
+    for i in range(60, len(cols)):
         date_col = cols[i]
         if date_col > end_date:
             break
-        next_date = cols[i + 1]
+        next_date = cols[i + 1] if i + 1 < len(cols) else None
         codes = closes.index
         frame = pd.DataFrame(
             {
@@ -248,7 +249,11 @@ def build_stock_features(
                 ),
                 "pe_ttm": pe[date_col].reindex(codes).values if date_col in pe.columns else np.nan,
                 "circ_mv": circ[date_col].reindex(codes).values if date_col in circ.columns else np.nan,
-                "residual_next": (pct[next_date] - industry_ret1[next_date]).values,
+                "residual_next": (
+                    (pct[next_date] - industry_ret1[next_date]).values
+                    if next_date is not None
+                    else np.full(len(codes), np.nan)
+                ),
             }
         )
         rows.append(frame)
