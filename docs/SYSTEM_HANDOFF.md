@@ -19,10 +19,11 @@
 | 项目 | 状态 |
 |---|---|
 | 部署 | `/home/ubuntu/market-strategy-system`，venv 独立，`.env` 600 |
-| 调度 | 23:00 `nightly`（已开启推送）；23:03 health；周六 02:00 train |
+| 调度 | 23:00 `nightly`（已开启推送）；23:03 health；23:10 track-outcomes；周六 02:00 train / 03:00 backtest |
 | 数据 | Tushare 3 年回灌（725 交易日 / 390 万日线 / 390 万每日指标 / 指数），PIT 字段已建 |
 | 新闻/事实 | 财联社(Tushare)/巨潮/政府网/部委多源；DeepSeek 原子事实抽取可用 |
-| 模型 | HMM + LightGBM + Isotonic 校准 v1 已训练并上线（market acc 54% / Brier 0.248 / 板块 RankIC 0.021 / 个股 RankIC 0.046） |
+| 模型 | HMM + LightGBM + Isotonic 校准 v2 已训练并上线（个股 RankIC 0.046，可执行宇宙 175 万行） |
+| 回测 | 2026-08-05 首次回测（可执行宇宙、100 天样本外）：市场方向 Brier 0.324 暂劣于无条件基线；板块 RankIC 0.018；个股 RankIC 0.042 优于动量/反转基线；Top10 组合日均超额 -0.13%（成本后），动量基线 -0.84%。结论：个股排序有弱信号，市场方向与组合净值尚未跑赢成本，继续影子验证 |
 | 推送 | 2026-08-05 01:27 首次真实推送成功（8/6 报告，11 只候选） |
 | 报告服务 | `127.0.0.1:8082`，nginx `/strategy/` 反代，JCKX 密码登录，WireGuard 内网 |
 | 原系统 | 未改动（nginx 仅新增 location，配置备份 `/root/nginx_jckx-reports.bak.20260804`） |
@@ -58,7 +59,7 @@ cd /home/ubuntu/market-strategy-system
 
 ## 6. 待办
 
-- 回测框架（Walk-Forward + 基线对比 + 含成本模拟）。
-- 降级状态机（facts_only/abstain）与失败告警完善。
-- GitHub 推送权限（Codex App 授权新仓库）与 CI。
-- 候选次日相对收益跟踪（每交易日记录）。
+- GitHub 推送：Codex 桌面端重新连接 GitHub App 以签发含新仓库权限的 token，之后推送代码并启用 CI。
+- 市场方向模型改进（当前 Brier 劣于无条件基线，暂不作为主决策依据）。
+- 组合成本后净值跟踪：连续样本窗口验证个股 RankIC 是否能转化为可执行收益。
+- 降级状态机（facts_only/abstain）细节完善与告警分级。
