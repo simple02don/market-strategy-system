@@ -1,6 +1,6 @@
 # A股主力策略情景推演与分层选股系统 · 接手文件
 
-> 最后核验时间：2026-08-04
+> 最后核验时间：2026-08-05 01:30
 > GitHub（目标）：`simple02don/market-strategy-system`（私有；Codex GitHub App
 >  尚需在该仓库授权 Contents 写权限后才能推送）
 > 生产：`root@43.136.54.243:/home/ubuntu/market-strategy-system`（ubuntu 运行）
@@ -19,10 +19,11 @@
 | 项目 | 状态 |
 |---|---|
 | 部署 | `/home/ubuntu/market-strategy-system`，venv 独立，`.env` 600 |
-| 调度 | 23:00 `nightly --no-push`（验收前不推送）；23:03 health；周六 02:00 train |
+| 调度 | 23:00 `nightly`（已开启推送）；23:03 health；周六 02:00 train |
 | 数据 | Tushare 3 年回灌（725 交易日 / 390 万日线 / 390 万每日指标 / 指数），PIT 字段已建 |
 | 新闻/事实 | 财联社(Tushare)/巨潮/政府网/部委多源；DeepSeek 原子事实抽取可用 |
-| 模型 | 规则基线已跑通；HMM/LightGBM/校准训练管线已实现，首次训练验证中 |
+| 模型 | HMM + LightGBM + Isotonic 校准 v1 已训练并上线（market acc 54% / Brier 0.248 / 板块 RankIC 0.021 / 个股 RankIC 0.046） |
+| 推送 | 2026-08-05 01:27 首次真实推送成功（8/6 报告，11 只候选） |
 | 报告服务 | `127.0.0.1:8082`，nginx `/strategy/` 反代，JCKX 密码登录，WireGuard 内网 |
 | 原系统 | 未改动（nginx 仅新增 location，配置备份 `/root/nginx_jckx-reports.bak.20260804`） |
 
@@ -57,7 +58,6 @@ cd /home/ubuntu/market-strategy-system
 
 ## 6. 待办
 
-- 首次模型训练验收（指标：市场 Brier、板块/个股 Rank IC）并切换 23:00 推送。
 - 回测框架（Walk-Forward + 基线对比 + 含成本模拟）。
 - 降级状态机（facts_only/abstain）与失败告警完善。
 - GitHub 推送权限（Codex App 授权新仓库）与 CI。
