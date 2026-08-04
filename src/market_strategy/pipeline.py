@@ -212,6 +212,12 @@ class NightlyPipeline:
                 "failed",
                 detail=f"{type(exc).__name__}: {exc}"[:2000],
             )
+            if push and not dry_run:
+                self.pusher.send_markdown(
+                    f"## 市场策略系统夜间运行失败\n"
+                    f"> {type(exc).__name__}: {str(exc)[:300]}\n"
+                    f"> 请检查服务器 logs/run_nightly.log"
+                )
             return {"status": "failed", "run_id": run_id, "error": str(exc)}
 
     def _compose(
@@ -282,6 +288,11 @@ class NightlyPipeline:
             "trade_date": latest_str,
             "next_trade_date": next_day_str,
             "stale_days": (next_dt - latest_dt).days,
+            "system_status": (
+                "normal"
+                if context.get("available") and state.get("available")
+                else "degraded"
+            ),
             "market_context": context,
             "market_state": state,
             "scenarios": scenarios,

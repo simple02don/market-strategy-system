@@ -8,10 +8,13 @@ import sys
 from datetime import date, datetime, timedelta
 
 from . import config
+from .backtest import run_backtest
 from .calendar import TradingCalendar
 from .models.train import train_all
+from .outcomes import track_outcomes
 from .pipeline import NightlyPipeline
 from .providers.tushare_provider import TushareProvider
+from .push.wecom import WeComPusher
 from .storage import Storage
 from .timeutil import now_cst
 
@@ -117,12 +120,51 @@ def cmd_health(args) -> int:
             "last_date": storage._conn.execute("SELECT MAX(trade_date) FROM daily_bar").fetchone()[0],
         }
         report_files = sorted(config.REPORT_DIR.glob("market_strategy_*.html")) if config.REPORT_DIR.exists() else []
+        healthy = bool(latest and latest.get("status") == "ok")
         result = {
-            "status": "ok" if latest and latest.get("status") == "ok" else "alert",
+            "status": "ok" if healthy else "alert",
             "latest_nightly": latest,
             "data": counts,
             "latest_report": report_files[-1].name if report_files else None,
         }
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        if not healthy:
+            alert = (
+                f"## 市场策略系统健康告警\n"
+                f"> 最近夜间任务：{latest.get('status') if latest else '无记录'}\n"
+                f"> 数据：日线 {counts['daily_rows']} / 最新 {counts['last_date']}\n"
+                f"> 请检查 logs/run_nightly.log"
+            )
+            WeComPusher().send_markdown(alert)
+    return 0
+
+
+def cmd_track_outcomes(args) -> int:
+    with Storage() as storage:
+        max_date = args.trade_date or storage._conn.execute(
+            "SELECT MAX(trade_date) FROM daily_bar"
+        ).fetchone()[0]
+        result = track_outcomes(storage, str(max_date))
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    return 0
+
+
+def cmd_backtest(args) -> int:
+    with Storage() as storage:
+        max_date = args.trade_date or storage._conn.execute(
+            "SELECT MAX(trade_date) FROM daily_bar"
+        ).fetchone()[0]
+        result = run_backtest(
+            storage,
+            str(max_date),
+            train_days=args.train_days,
+            test_days=args.test_days,
+        )
+        output = config.REPORT_DIR.parent / "backtest_latest.json"
+        output.write_text(
+            json.dumps(result, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
     return 0
 
@@ -143,6 +185,12 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("train", help="模型训练（低峰自动运行）")
     p.add_argument("--trade-date")
     sub.add_parser("health", help="健康检查")
+    p = sub.add_parser("track-outcomes", help="候选次日结果跟踪")
+    p.add_argument("--trade-date")
+    p = sub.add_parser("backtest", help="回测与基线对比")
+    p.add_argument("--trade-date")
+    p.add_argument("--train-days", type=int, default=400)
+    p.add_argument("--test-days", type=int, default=100)
     args = parser.parse_args(argv)
     config.ensure_dirs()
     return {
@@ -152,6 +200,8 @@ def main(argv: list[str] | None = None) -> int:
         "nightly": cmd_nightly,
         "train": cmd_train,
         "health": cmd_health,
+        "track-outcomes": cmd_track_outcomes,
+        "backtest": cmd_backtest,
     }[args.job](args)
 
 

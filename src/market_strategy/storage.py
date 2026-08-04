@@ -137,6 +137,19 @@ CREATE TABLE IF NOT EXISTS prediction_log (
   payload TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_pred_trade ON prediction_log(trade_date);
+
+CREATE TABLE IF NOT EXISTS candidate_outcome (
+  prediction_id INTEGER PRIMARY KEY,
+  ts_code TEXT NOT NULL,
+  trade_date TEXT NOT NULL,
+  tier TEXT,
+  score REAL,
+  ret_next REAL,
+  industry_ret_next REAL,
+  market_ret_next REAL,
+  excess REAL,
+  recorded_at TEXT NOT NULL
+);
 """
 
 
@@ -475,3 +488,51 @@ class Storage:
             ),
         )
         self._conn.commit()
+
+    def pending_outcomes(self, max_data_date: str) -> list[dict]:
+        rows = self._conn.execute(
+            """
+            SELECT id, trade_date, entity, payload FROM prediction_log
+            WHERE category='candidate'
+              AND trade_date <= ?
+              AND id NOT IN (SELECT prediction_id FROM candidate_outcome)
+            ORDER BY id
+            """,
+            (max_data_date,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def upsert_outcome(self, row: dict) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO candidate_outcome(
+              prediction_id, ts_code, trade_date, tier, score,
+              ret_next, industry_ret_next, market_ret_next, excess, recorded_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                row["prediction_id"], row["ts_code"], row["trade_date"],
+                row.get("tier"), row.get("score"), row.get("ret_next"),
+                row.get("industry_ret_next"), row.get("market_ret_next"),
+                row.get("excess"), _now(),
+            ),
+        )
+        self._conn.commit()
+
+    def outcome_summary(self) -> dict:
+        row = self._conn.execute(
+            """
+            SELECT COUNT(*) AS n,
+                   AVG(excess) AS mean_excess,
+                   SUM(CASE WHEN excess > 0 THEN 1 ELSE 0 END) AS win,
+                   AVG(ret_next) AS mean_ret
+            FROM candidate_outcome
+            """
+        ).fetchone()
+        n = int(row["n"] or 0)
+        return {
+            "n": n,
+            "mean_excess": round(float(row["mean_excess"] or 0.0), 4),
+            "hit_rate": round(int(row["win"] or 0) / n, 4) if n else 0.0,
+            "mean_ret": round(float(row["mean_ret"] or 0.0), 4),
+        }

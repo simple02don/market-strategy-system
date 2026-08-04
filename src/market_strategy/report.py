@@ -30,6 +30,7 @@ def generate_report(payload: dict[str, Any], output: Path) -> Path:
     breadth = ((payload.get("market_context") or {}).get("breadth") or {})
     data_status = payload.get("data_status") or {}
     stale_days = int(payload.get("stale_days") or 0)
+    system_status = payload.get("system_status", "normal")
 
     state_rows = "".join(
         f"<tr><td>{_esc(k)}</td><td>{_pct(v)}</td></tr>"
@@ -84,7 +85,7 @@ th{{color:#8fa0bd;font-weight:500}}
 <h1>主力策略情景推演与分层选股</h1>
 <div class="meta">交易日 {trade_date} → 下一交易日 {next_day}<br>
 决策时点 {_esc(payload.get('decision_time'))} · 信息截止 {cutoff}<br>
-数据集 {_esc(payload.get('dataset_version'))} · 模型 {_esc(payload.get('model_version'))}</div>
+数据集 {_esc(payload.get('dataset_version'))} · 模型 {_esc(payload.get('model_version'))} · 系统状态 {_esc(system_status)}</div>
 {stale_warning}
 <div class="card"><h2>今日市场状态</h2>
 <p>主导：<b>{_esc(state.get('label'))}</b>（{_esc(state.get('model_version'))}）</p>
