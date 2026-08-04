@@ -136,13 +136,20 @@ def _portfolio(
         daily = []
         for date, group in frame.groupby("date"):
             picks = group.nlargest(top_k, column)
-            daily.append(float(picks["residual_next"].mean()) - cost)
-        series = pd.Series(daily)
+            daily.append(
+                {
+                    "date": date,
+                    "excess": round(float(picks["residual_next"].mean()) - cost, 4),
+                    "mean_pred": round(float(picks[column].mean()), 4),
+                }
+            )
+        series = pd.Series([item["excess"] for item in daily])
         out[label] = {
             "days": int(len(series)),
             "mean_daily_excess": round(float(series.mean()), 4),
             "hit_rate": round(float((series > 0).mean()), 4),
             "cum_excess": round(float(series.sum()), 4),
             "max_drawdown": round(float((series.cumsum() - series.cumsum().cummax()).min()), 4),
+            "daily_sample": daily[-10:],
         }
     return out
