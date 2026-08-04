@@ -18,6 +18,7 @@ PORT = int(os.environ.get("JCKX_AUTH_PORT", "8082"))
 PASSWORD = os.environ.get("JCKX_PASSWORD", "")
 TOKEN = os.environ.get("JCKX_TOKEN", "")
 PUBLIC = os.environ.get("JCKX_PUBLIC_REPORTS", "0").strip().lower() in {"1", "true", "yes"}
+BASE_PATH = urlparse(os.environ.get("JCKX_REPORT_BASE_URL", "http://10.66.0.1/strategy")).path.rstrip("/")
 
 COOKIE_NAME = "jckx_report_session"
 SESSION_SECONDS = 12 * 3600
@@ -71,14 +72,14 @@ class Handler(BaseHTTPRequestHandler):
         return (
             "<!doctype html><html><body style='background:#0f1420;color:#dfe6f2;"
             "font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:90vh'>"
-            "<form method='post' action='/login'><h2>市场策略报告</h2>"
+            f"<form method='post' action='{BASE_PATH}/login'><h2>市场策略报告</h2>"
             "<input type='password' name='password' placeholder='密码' autofocus>"
             "<button>登录</button></form></body></html>"
         ).encode()
 
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
-        if path in {"/", "/index.html"}:
+        if path in {BASE_PATH, f"{BASE_PATH}/", "/", "/index.html"}:
             if not self._auth_ok():
                 self._send(401, self._login_page())
                 return
@@ -87,7 +88,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, "<html><body>暂无报告</body></html>".encode())
                 return
             links = "".join(
-                f"<li><a href='/{f.name}'>{f.name}</a></li>"
+                f"<li><a href='{BASE_PATH}/{f.name}'>{f.name}</a></li>"
                 for f in files[-30:]
             )
             self._send(200, f"<html><body><ul>{links}</ul></body></html>".encode())
@@ -120,7 +121,7 @@ class Handler(BaseHTTPRequestHandler):
             302,
             b"",
             headers={
-                "Location": "/",
+                "Location": f"{BASE_PATH}/",
                 "Set-Cookie": (
                     f"{COOKIE_NAME}={cookie_value}; Path=/; HttpOnly; "
                     f"Max-Age={SESSION_SECONDS}; SameSite=Lax"
