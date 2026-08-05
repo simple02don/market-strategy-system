@@ -93,6 +93,71 @@ def _daily_rank_ic(frame: pd.DataFrame, pred: np.ndarray, actual_col: str) -> fl
     return float(np.mean(values)) if values else 0.0
 
 
+def _walkforward_folds(
+    dates,
+    folds: int = 8,
+    train_days: int = 120,
+    test_days: int = 30,
+) -> list[tuple[list, list]]:
+    """滚动窗口：每折 train 在前、test 在后，窗口随时间前移。"""
+    ordered = list(dates)
+    out: list[tuple[list, list]] = []
+    for fold in range(folds):
+        end = len(ordered) - fold * test_days
+        if end - train_days - test_days < 10:
+            break
+        out.append(
+            (
+                ordered[end - train_days - test_days : end - test_days],
+                ordered[end - test_days : end],
+            )
+        )
+    return out
+
+
+def _walkforward_market(
+    frame: pd.DataFrame,
+    folds: int = 8,
+    train_days: int = 120,
+    test_days: int = 30,
+) -> dict:
+    """市场方向模型的滚动样本外检验（仅用于晋级参考，不直接进审批门槛）。"""
+    frame = frame.dropna(subset=["idx_ret1_next"]).sort_values("date")
+    dates = frame["date"].unique()
+    results: list[dict] = []
+    for train_dates, test_dates in _walkforward_folds(dates, folds, train_days, test_days):
+        train = frame[frame["date"].isin(train_dates)]
+        test = frame[frame["date"].isin(test_dates)]
+        if len(test) < 10:
+            continue
+        model = lgb.train(
+            {**_lgb_params(), "objective": "binary", "metric": "binary_logloss"},
+            lgb.Dataset(
+                train[MARKET_FEATURES].fillna(0.0),
+                label=(train["idx_ret1_next"] > 0).astype(int).values,
+            ),
+            num_boost_round=200,
+        )
+        pred = model.predict(test[MARKET_FEATURES].fillna(0.0))
+        y_test = (test["idx_ret1_next"] > 0).astype(int).values
+        baseline = float((train["idx_ret1_next"] > 0).mean())
+        brier = float(np.mean((pred - y_test) ** 2))
+        baseline_brier = float(np.mean((baseline - y_test) ** 2))
+        results.append(
+            {"brier": brier, "baseline_brier": baseline_brier, "win": brier < baseline_brier}
+        )
+    if not results:
+        return {"folds": 0}
+    return {
+        "folds": len(results),
+        "mean_brier": round(float(np.mean([row["brier"] for row in results])), 4),
+        "mean_baseline_brier": round(
+            float(np.mean([row["baseline_brier"] for row in results])), 4
+        ),
+        "win_rate": round(float(np.mean([row["win"] for row in results])), 4),
+    }
+
+
 def _costed_topk_mean(
     frame: pd.DataFrame,
     pred: np.ndarray,
@@ -243,6 +308,16 @@ def _train_all_impl(storage: Storage, trade_date: str, started: str) -> dict:
     market_baseline_brier = float(np.mean((market_baseline - y_val) ** 2))
     market_acc = float(np.mean((cal_val >= 0.5) == (y_val == 1)))
     market_scaler = {"mean": mean_.tolist(), "std": std_.tolist()}
+    walkforward = _walkforward_market(market)
+    if walkforward.get("folds", 0) > 0:
+        metrics = {
+            "market_walkforward_folds": walkforward["folds"],
+            "market_walkforward_mean_brier": walkforward["mean_brier"],
+            "market_walkforward_mean_baseline_brier": walkforward["mean_baseline_brier"],
+            "market_walkforward_win_rate": walkforward["win_rate"],
+        }
+    else:
+        metrics = {}
 
     # ---- 板块 LightGBM ----
     sector = sector.dropna(subset=["excess1_next"])
@@ -282,6 +357,7 @@ def _train_all_impl(storage: Storage, trade_date: str, started: str) -> dict:
     stock_calibrator.fit(stock_pred_cal, (stk_cal["residual_next"] > 0).astype(int).values)
 
     metrics = {
+        **metrics,
         "market_brier": round(market_brier, 4),
         "market_baseline_brier": round(market_baseline_brier, 4),
         "market_accuracy": round(market_acc, 4),
@@ -355,7 +431,12 @@ def _train_all_impl(storage: Storage, trade_date: str, started: str) -> dict:
             selected_status[component] = component_status[component]
     selected_metrics = dict(previous_metrics) if previous else {}
     metric_groups = {
-        "market": ("market_brier", "market_baseline_brier", "market_accuracy", "market_rows", "val_dates"),
+        "market": (
+            "market_brier", "market_baseline_brier", "market_accuracy",
+            "market_rows", "val_dates",
+            "market_walkforward_folds", "market_walkforward_mean_brier",
+            "market_walkforward_mean_baseline_brier", "market_walkforward_win_rate",
+        ),
         "sector": ("sector_daily_rank_ic", "sector_baseline_daily_rank_ic", "sector_rank_ic", "sector_rows"),
         "stock": (
             "stock_daily_rank_ic", "stock_baseline_daily_rank_ic", "stock_rank_ic",

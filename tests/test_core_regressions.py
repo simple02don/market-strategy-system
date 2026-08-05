@@ -9,7 +9,11 @@ from market_strategy.backtest import _portfolio, _split
 from market_strategy.cli import _fallback_data_day, _resolve_latest_data_day
 from market_strategy.features.market import market_context
 from market_strategy.models.inference import infer_stocks
-from market_strategy.models.train import _four_way_date_split
+from market_strategy.models.train import (
+    _four_way_date_split,
+    _walkforward_folds,
+    _walkforward_market,
+)
 from market_strategy.models.stock_rank import rank_stocks
 from market_strategy.providers.index_fallback import _parse_klines
 from market_strategy.pipeline import (
@@ -326,6 +330,49 @@ def test_train_failure_records_experiment(tmp_path):
     assert rows[0]["trained_through"] == "20260805"
     assert rows[0]["config"] != "{}"
     storage.close()
+
+
+def test_walkforward_folds_are_sequential_and_nonoverlapping():
+    dates = [f"d{index:03d}" for index in range(400)]
+    folds = _walkforward_folds(dates, folds=8, train_days=120, test_days=30)
+    assert len(folds) == 8
+    for train, test in folds:
+        assert len(train) == 120
+        assert len(test) == 30
+        assert set(train).isdisjoint(set(test))
+    assert folds[0][1][-1] == "d399"
+    assert folds[-1][1][-1] == "d189"
+
+
+def test_walkforward_market_reports_stability_metrics():
+    rows = []
+    for day in range(100):
+        rows.append(
+            {
+                "date": f"202601{day:02d}",
+                "idx_ret1": day % 5,
+                "idx_ret5": 1.0,
+                "idx_ret20": 2.0,
+                "ma20_dev": 0.1,
+                "vol20": 0.2,
+                "amount_z": 0.0,
+                "adv_ratio": 0.5,
+                "limit_up": 30,
+                "limit_down": 5,
+                "new_high": 100,
+                "new_low": 20,
+                "idx_ret1_next": 0.5 if day % 2 == 0 else -0.5,
+            }
+        )
+    result = _walkforward_market(
+        pd.DataFrame(rows),
+        folds=4,
+        train_days=30,
+        test_days=10,
+    )
+    assert result["folds"] >= 1
+    assert 0.0 <= result["mean_brier"] <= 1.0
+    assert 0.0 <= result["win_rate"] <= 1.0
 
 
 def test_pipeline_uses_evidence_before_decision_and_can_be_normal(tmp_path, monkeypatch):
