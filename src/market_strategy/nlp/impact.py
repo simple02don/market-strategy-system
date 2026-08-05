@@ -63,7 +63,6 @@ def assess_news_impact(
         else:
             group = "official"
         groups[group].append(item)
-    quota = max(1, max_items // 3)
     material_terms = (
         "回购", "增持", "减持", "业绩", "预告", "中标", "重大", "重组",
         "立案", "调查", "处罚", "停牌", "风险", "终止", "分红", "并购",
@@ -73,71 +72,96 @@ def assess_news_impact(
         text = f"{item.get('title', '')} {item.get('summary', '')}"
         return sum(1 for term in material_terms if term in text)
 
-    selected: list[dict[str, Any]] = []
-    for group in ("official", "news", "disclosure"):
-        selected.extend(
-            sorted(
-                groups[group],
-                key=lambda item: (
-                    int(item.get("tier", 5) or 5),
-                    -relevance(item),
-                    -time_rank(item),
-                ),
-            )[:quota]
-        )
-    if len(selected) < max_items:
-        selected_ids = {id(item) for item in selected}
-        remaining = [item for item in items if id(item) not in selected_ids]
-        selected.extend(sorted(remaining, key=time_rank, reverse=True)[: max_items - len(selected)])
-    documents = []
-    allowed: dict[str, dict[str, Any]] = {}
-    for item in selected:
-        item_id = str(item.get("source_id") or "")
-        if not item_id or item_id in allowed:
-            continue
-        allowed[item_id] = item
-        documents.append(
-            {
-                "id": item_id,
-                "source": str(item.get("source", "")),
-                "publish_time": str(item.get("publish_time", "")),
-                "title": str(item.get("title", ""))[:300],
-                "summary": str(item.get("summary", ""))[:1200],
-            }
-        )
-    if not documents:
-        return {"status": "unavailable", "assessments": {}, "error": "no_documents"}
-    try:
-        client = OpenAI(
-            api_key=api_key,
-            base_url=config.env_str("AI_PRIMARY_BASE_URL", "https://api.deepseek.com"),
-        )
-        kwargs: dict[str, Any] = {
-            "model": config.env_str("AI_PRIMARY_MODEL", "deepseek-v4-flash"),
-            "messages": [
-                {"role": "system", "content": "只输出合法 JSON 数组；不得使用输入之外的事实。"},
+    def select_documents(max_n: int) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+        quota = max(1, max_n // 3)
+        selected: list[dict[str, Any]] = []
+        for group in ("official", "news", "disclosure"):
+            selected.extend(
+                sorted(
+                    groups[group],
+                    key=lambda item: (
+                        int(item.get("tier", 5) or 5),
+                        -relevance(item),
+                        -time_rank(item),
+                    ),
+                )[:quota]
+            )
+        if len(selected) < max_n:
+            selected_ids = {id(item) for item in selected}
+            remaining = [item for item in items if id(item) not in selected_ids]
+            selected.extend(
+                sorted(remaining, key=time_rank, reverse=True)[: max_n - len(selected)]
+            )
+        documents: list[dict[str, Any]] = []
+        allowed: dict[str, dict[str, Any]] = {}
+        for item in selected:
+            item_id = str(item.get("source_id") or "")
+            if not item_id or item_id in allowed:
+                continue
+            allowed[item_id] = item
+            documents.append(
                 {
-                    "role": "user",
-                    "content": IMPACT_PROMPT + json.dumps(documents, ensure_ascii=False),
-                },
-            ],
-            "temperature": 0.0,
-            "max_tokens": 3500,
-        }
-        if config.env_int("TAIL_AI_PRIMARY_DISABLE_THINKING", 1):
-            kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
-        response = client.chat.completions.create(**kwargs)
-        content = response.choices[0].message.content or ""
-        content = re.sub(r"^```(?:json)?|```$", "", content.strip(), flags=re.M)
-        parsed = json.loads(content)
-        if not isinstance(parsed, list):
-            raise ValueError("impact response is not a list")
-    except Exception as exc:  # noqa: BLE001
-        return {
-            "status": "failed",
-            "assessments": {},
-            "error": f"{type(exc).__name__}: {str(exc)[:200]}",
-        }
+                    "id": item_id,
+                    "source": str(item.get("source", "")),
+                    "publish_time": str(item.get("publish_time", "")),
+                    "title": str(item.get("title", ""))[:300],
+                    "summary": str(item.get("summary", ""))[:1200],
+                }
+            )
+        return documents, allowed
+
+    client = OpenAI(
+        api_key=api_key,
+        base_url=config.env_str("AI_PRIMARY_BASE_URL", "https://api.deepseek.com"),
+    )
+    budgets = [
+        max_items,
+        max(1, max_items // 2),
+        max(1, max_items // 3),
+        max(1, max_items // 4),
+    ]
+    last_error = "no_documents"
+    parsed: Any = None
+    allowed: dict[str, dict[str, Any]] = {}
+    documents: list[dict[str, Any]] = []
+    for budget in budgets:
+        documents, allowed = select_documents(budget)
+        if not documents:
+            continue
+        try:
+            kwargs: dict[str, Any] = {
+                "model": config.env_str("AI_PRIMARY_MODEL", "deepseek-v4-flash"),
+                "messages": [
+                    {"role": "system", "content": "只输出合法 JSON 数组；不得使用输入之外的事实。"},
+                    {
+                        "role": "user",
+                        "content": IMPACT_PROMPT + json.dumps(documents, ensure_ascii=False),
+                    },
+                ],
+                "temperature": 0.0,
+                "max_tokens": 8000,
+            }
+            if config.env_int("TAIL_AI_PRIMARY_DISABLE_THINKING", 1):
+                kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+            response = client.chat.completions.create(**kwargs)
+            content = response.choices[0].message.content or ""
+            content = re.sub(r"^```(?:json)?|```$", "", content.strip(), flags=re.M)
+            parsed = json.loads(content)
+            if not isinstance(parsed, list):
+                raise ValueError("impact response is not a list")
+            break
+        except (json.JSONDecodeError, ValueError) as exc:
+            # 输出被 max_tokens 截断或结构非法：缩减条目后重试，保留前序选择偏好。
+            last_error = f"{type(exc).__name__}: {str(exc)[:200]}"
+            continue
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "status": "failed",
+                "assessments": {},
+                "error": f"{type(exc).__name__}: {str(exc)[:200]}",
+            }
+    if parsed is None:
+        return {"status": "failed", "assessments": {}, "error": last_error}
 
     valid_signals = {
         "护指数", "政策驱动轮动", "拉主线", "高低切", "兑现降风险", "风险释放",

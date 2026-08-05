@@ -1,5 +1,9 @@
+import json
+import re
+
 from market_strategy.features.evidence import build_evidence_bundle, filter_pit_items
 from market_strategy.models.inference import infer_market
+from market_strategy.nlp import impact
 
 
 def _item(source, source_id, title, publish_time, summary="", tier=2):
@@ -11,6 +15,65 @@ def _item(source, source_id, title, publish_time, summary="", tier=2):
         "publish_time": publish_time,
         "tier": tier,
     }
+
+
+class _FakeImpactClient:
+    """第一次返回被截断的 JSON，之后返回合法 JSON 数组。"""
+
+    def __init__(self):
+        self.calls = 0
+
+    @property
+    def chat(self):
+        return self
+
+    @property
+    def completions(self):
+        return self
+
+    def create(self, **kwargs):
+        self.calls += 1
+        content = kwargs["messages"][1]["content"]
+        ids = re.findall(r'"id":\s*"([^"]+)"', content)
+        if self.calls == 1:
+            return _FakeResponse('{"id": "oops"')
+        rows = [
+            {"id": item_id, "market_impact": 0.2, "confidence": 0.8,
+             "horizon": "next_day", "sectors": [], "stocks": [],
+             "operator_signals": ["拉主线"], "rationale": "依据"}
+            for item_id in ids
+        ]
+        return _FakeResponse(json.dumps(rows, ensure_ascii=False))
+
+
+class _FakeResponse:
+    def __init__(self, content):
+        self.choices = [_FakeChoice(content)]
+
+
+class _FakeChoice:
+    def __init__(self, content):
+        self.message = _FakeMessage(content)
+
+
+class _FakeMessage:
+    def __init__(self, content):
+        self.content = content
+
+
+def test_impact_retries_with_fewer_items_on_truncated_json(monkeypatch):
+    monkeypatch.setenv("AI_PRIMARY_API_KEY", "test-key")
+    fake = _FakeImpactClient()
+    monkeypatch.setattr(impact, "OpenAI", lambda **kwargs: fake)
+    items = [
+        _item("cls_telegraph", f"n{i:03d}", f"标题 {i}", "2026-08-05 20:00:00")
+        for i in range(1, 31)
+    ]
+    result = impact.assess_news_impact(items, max_items=30)
+    assert result["status"] == "ok"
+    assert fake.calls >= 2
+    assert result["requested"] < 30
+    assert result["received"] == result["requested"]
 
 
 def test_pit_filter_rejects_future_unknown_and_cross_source_duplicate():
