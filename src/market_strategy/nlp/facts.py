@@ -89,10 +89,17 @@ def extract_facts(
         for item in items
         if item.get("tier", 5) <= 1 and item.get("title") and "异常" not in item.get("title", "")
     ][:max_items]
+    existing = storage.fact_document_ids(
+        [str(item.get("source_id") or _hash(item.get("title", ""))) for item in high_value]
+    )
     extracted = 0
+    reused = 0
     errors = 0
     for item in high_value:
         document_id = item.get("source_id") or _hash(item.get("title", ""))
+        if str(document_id) in existing:
+            reused += 1
+            continue
         text = item.get("summary") or ""
         if not text and item.get("url"):
             text = _fetch_text(str(item["url"]))
@@ -105,6 +112,11 @@ def extract_facts(
             continue
         rows = []
         for fact in facts:
+            source_span = str(fact.get("source_span", ""))[:500]
+            span_verified = bool(
+                len(source_span) >= 8
+                and _clean(source_span) in _clean(text)
+            )
             rows.append(
                 {
                     "document_id": document_id,
@@ -117,13 +129,20 @@ def extract_facts(
                     "unit": str(fact.get("unit", "")),
                     "conditions": str(fact.get("conditions", "")),
                     "effective_time": str(fact.get("effective_time", "")),
-                    "source_span": str(fact.get("source_span", ""))[:500],
+                    "source_span": source_span,
                     "sector_links": json.dumps(fact.get("sector_links", []), ensure_ascii=False),
-                    "verification_status": str(fact.get("verification_status", "unverified")),
+                    "verification_status": "verified" if span_verified else "unverified",
                     "model_version": model_version,
                 }
             )
         if rows:
-            storage.insert_facts(rows)
-            extracted += len(rows)
-    return {"extracted": extracted, "errors": errors, "candidates": len(high_value)}
+            extracted += storage.insert_facts(rows)
+    return {
+        "extracted": extracted,
+        "reused_documents": reused,
+        "errors": errors,
+        "candidates": len(high_value),
+        "document_ids": [
+            str(item.get("source_id") or _hash(item.get("title", ""))) for item in high_value
+        ],
+    }

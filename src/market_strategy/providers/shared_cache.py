@@ -38,6 +38,17 @@ class SharedCacheReader:
         try:
             with open(files[-1], "rb") as handle:
                 data = pickle.load(handle)
+            if not isinstance(data, dict):
+                return {"items": [], "asof": "", "ok": False, "reason": "invalid_root_type"}
+            version = data.get("schema_version") or data.get("version")
+            expected = config.env_str("SHARED_EVENT_CACHE_VERSION", "")
+            if not version:
+                return {"items": [], "asof": "", "ok": False, "reason": "cache_version_missing"}
+            if expected and str(version) != expected:
+                return {
+                    "items": [], "asof": "", "ok": False,
+                    "reason": f"cache_version_mismatch:{version}",
+                }
             items = data.get("items", []) if isinstance(data, dict) else []
             asof = str(data.get("decision_asof") or "") if isinstance(data, dict) else ""
             return {
@@ -45,6 +56,7 @@ class SharedCacheReader:
                 "asof": asof,
                 "ok": True,
                 "reason": "",
+                "version": str(version),
             }
         except Exception as exc:  # noqa: BLE001
             return {"items": [], "asof": "", "ok": False, "reason": str(exc)[:300]}

@@ -27,6 +27,7 @@ def generate_report(payload: dict[str, Any], output: Path) -> Path:
     sectors = payload.get("sectors") or []
     candidates = payload.get("candidates") or []
     facts = payload.get("facts") or {}
+    evidence = payload.get("evidence") or {}
     breadth = ((payload.get("market_context") or {}).get("breadth") or {})
     data_status = payload.get("data_status") or {}
     stale_days = int(payload.get("stale_days") or 0)
@@ -61,11 +62,30 @@ def generate_report(payload: dict[str, Any], output: Path) -> Path:
     else:
         candidate_rows = "<tr><td colspan='7'>无合格候选（合法空仓）</td></tr>"
     fact_lines = "".join(f"<li>{_esc(f)}</li>" for f in (facts.get("summary") or [])[:6]) or "<li>无</li>"
+    hypotheses = "".join(
+        f"<li><b>{_esc(item.get('name'))}</b>（证据分 {_esc(item.get('score'))}）<br>"
+        f"支持：{_esc('；'.join(item.get('support') or []) or '无')}<br>"
+        f"反证：{_esc('；'.join(item.get('counterevidence') or []) or '无')}<br>"
+        f"次日验证：{_esc(item.get('next_day_plan'))}</li>"
+        for item in (evidence.get("operator_hypotheses") or [])[:5]
+    ) or "<li>证据不足，暂不形成操盘行为假设</li>"
+    evidence_rows = "".join(
+        f"<tr><td>{_esc(item.get('publish_time'))}</td><td>{_esc(item.get('source'))}</td>"
+        f"<td>{_esc(item.get('title'))}</td><td>{_esc(item.get('impact'))}</td>"
+        f"<td>{_esc(item.get('rationale'))}</td></tr>"
+        for item in (evidence.get("top_evidence") or [])[:8]
+    ) or "<tr><td colspan='5'>没有通过信息截止时间与跨源去重校验的证据</td></tr>"
 
     stale_warning = (
         f"<p class='warn'>最近行情日为 {_esc(data_status.get('latest_trade_date'))} "
         f"（{stale_days} 天前），本报告已纳入整个假期资讯窗口。</p>"
         if stale_days > 1
+        else ""
+    )
+    status_warning = (
+        f"<p class='warn'>系统处于 {_esc(system_status)}：资讯或行情证据未达到门槛，"
+        "本次不生成主推荐，情景概率仅作事实展示。</p>"
+        if system_status != "normal"
         else ""
     )
     document = f"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
@@ -86,21 +106,29 @@ th{{color:#8fa0bd;font-weight:500}}
 <div class="meta">交易日 {trade_date} → 下一交易日 {next_day}<br>
 决策时点 {_esc(payload.get('decision_time'))} · 信息截止 {cutoff}<br>
 数据集 {_esc(payload.get('dataset_version'))} · 模型 {_esc(payload.get('model_version'))} · 系统状态 {_esc(system_status)}</div>
-{stale_warning}
+	{stale_warning}
+	{status_warning}
 <div class="card"><h2>今日市场状态</h2>
 <p>主导：<b>{_esc(state.get('label'))}</b>（{_esc(state.get('model_version'))}）</p>
 <table><tr><th>状态</th><th>概率</th></tr>{state_rows}</table></div>
 <div class="card"><h2>市场宽度</h2>
 <p>上涨 {_esc(breadth.get('up'))} / 下跌 {_esc(breadth.get('down'))} · 涨停 {_esc(breadth.get('limit_up'))} / 跌停 {_esc(breadth.get('limit_down'))}
 · 60日新高 {_esc(breadth.get('new_high_60d'))} / 新低 {_esc(breadth.get('new_low_60d'))}</p></div>
-<div class="card"><h2>次日情景</h2><table><tr><th>情景</th><th>概率</th></tr>{scenario_rows}</table></div>
+	<div class="card"><h2>次日情景</h2><table><tr><th>情景</th><th>概率</th></tr>{scenario_rows}</table></div>
+	<div class="card"><h2>新闻 / 政策 / 情绪证据</h2>
+	<p>情绪 {_esc(evidence.get('market_sentiment'))} · 置信度 {_pct(evidence.get('confidence'))} ·
+	来源覆盖 {_pct(evidence.get('coverage'))} · 有效资讯 {_esc(evidence.get('valid_items'))} 条 ·
+	影响评估 {_esc(evidence.get('impact_status'))}（覆盖 {_pct(evidence.get('impact_coverage'))}）</p>
+	<h3>操盘行为假设</h3><ul>{hypotheses}</ul>
+	<table><tr><th>时间</th><th>来源</th><th>证据</th><th>影响</th><th>依据</th></tr>{evidence_rows}</table></div>
 <div class="card"><h2>板块职责与相对强弱 Top8</h2>
 <table><tr><th>行业</th><th>职责</th><th>评分</th><th>当日</th><th>20日超额</th></tr>{sector_rows}</table></div>
 <div class="card"><h2>个股推荐</h2>
 <table><tr><th>名称</th><th>代码</th><th>层级</th><th>角色</th><th>评分</th><th>行业</th><th>确认条件</th></tr>{candidate_rows}</table></div>
 <div class="card"><h2>政策/公告事实要点</h2><ul>{fact_lines}</ul></div>
-<div class="foot">本系统只生成研究与概率推演，不构成投资建议；不自动下单。<br>
-数据源：Tushare / 中国政府网 / 财联社 / 巨潮公告 / 东方财富。失败或数据缺失时系统进入降级或弃权状态。</div>
+	<div class="foot">本系统只生成研究与概率推演，不构成投资建议；不自动下单。<br>
+	“主力/操盘行为”是基于可见证据的竞争性假设，不代表已确认存在单一操盘主体。<br>
+	数据源：Tushare / 中国政府网 / 财联社 / 巨潮公告 / 东方财富。失败或数据缺失时系统进入事实模式或弃权状态。</div>
 </div></body></html>"""
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(document, encoding="utf-8")

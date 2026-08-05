@@ -15,6 +15,7 @@ def rank_sectors(
     *,
     window: int = 20,
     top: int = 10,
+    evidence_scores: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
     if bars.empty:
         return []
@@ -29,13 +30,15 @@ def rank_sectors(
     recent = pivoted.tail(window)
     market_avg = recent.mean(axis=1)
     out = []
+    evidence_scores = evidence_scores or {}
     for industry in pivoted.columns:
         today = float(latest.get(industry, np.nan))
         if not np.isfinite(today):
             continue
         momentum = float(recent[industry].sum()) if window else 0.0
         excess = float((recent[industry] - market_avg).sum()) if window else 0.0
-        score = 50.0 + today * 8.0 + momentum * 2.5 + excess * 3.0
+        evidence_score = float(evidence_scores.get(industry, 0.0) or 0.0)
+        score = 50.0 + today * 8.0 + momentum * 2.5 + excess * 3.0 + evidence_score * 12.0
         out.append(
             {
                 "industry": industry,
@@ -43,6 +46,7 @@ def rank_sectors(
                 "momentum_20d": round(momentum, 3),
                 "excess_20d": round(excess, 3),
                 "score": round(score, 2),
+                "evidence_score": round(evidence_score, 4),
                 "role": _sector_role(score, excess),
             }
         )

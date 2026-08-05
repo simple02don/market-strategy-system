@@ -43,13 +43,7 @@ def _load_pivots(
             "amount": "float32",
         }
     )
-    if min_amount > 0:
-        amounts = df.pivot_table(index="ts_code", columns="trade_date", values="amount")
-        # daily.amount 单位为千元；min_amount 参数单位为元
-        liquid = amounts[
-            roll_cols(amounts, 20, "mean").iloc[:, -1] >= min_amount / 1000
-        ].index
-        df = df[df["ts_code"].isin(liquid)]
+    # 流动性必须在每个历史日期单独判断，不能用回测终点决定整个历史股票池。
     closes = df.pivot_table(index="ts_code", columns="trade_date", values="close")
     opens = df.pivot_table(index="ts_code", columns="trade_date", values="open")
     highs = df.pivot_table(index="ts_code", columns="trade_date", values="high")
@@ -68,8 +62,17 @@ def _market_frame(
     dates = closes.columns
     ret1 = pct.mean(axis=0)  # 等权市场日收益（%）
     adv = (pct > 0).mean(axis=0)
-    limit_up = (pct >= 9.8).sum(axis=0) + (pct >= 19.8).sum(axis=0)
-    limit_down = (pct <= -9.8).sum(axis=0) + (pct <= -19.8).sum(axis=0)
+    symbols = pct.index.to_series().astype(str).str.split(".").str[0]
+    limits = pd.Series(
+        np.where(
+            symbols.str.startswith(("688", "689", "30")),
+            19.8,
+            np.where(symbols.str.startswith(("8", "4", "920")), 29.8, 9.8),
+        ),
+        index=pct.index,
+    )
+    limit_up = pct.ge(limits, axis=0).sum(axis=0)
+    limit_down = pct.le(-limits, axis=0).sum(axis=0)
     prev_high60 = shift_cols(roll_cols(closes, 60, "max"))
     prev_low60 = shift_cols(roll_cols(closes, 60, "min"))
     new_high = (closes >= prev_high60).sum(axis=0)
@@ -187,7 +190,7 @@ def build_stock_features(
     storage: Storage,
     end_date: str,
     days: int = 500,
-    min_amount: float = 5e7,
+    min_amount: float = 1.5e8,
     executable_only: bool = True,
 ) -> pd.DataFrame:
     dates = _recent_dates(storage, end_date, days + 70)
@@ -197,9 +200,28 @@ def build_stock_features(
     names = {
         str(row["ts_code"]): str(row["name"] or "")
         for row in storage._conn.execute(
-            "SELECT ts_code, name FROM stock_basic WHERE list_status='L'"
+            "SELECT ts_code, name FROM stock_basic"
         ).fetchall()
     }
+    list_dates = {
+        str(row["ts_code"]): str(row["list_date"] or "")
+        for row in storage._conn.execute(
+            "SELECT ts_code, list_date FROM stock_basic"
+        ).fetchall()
+    }
+    stock_columns = {
+        str(row[1]) for row in storage._conn.execute("PRAGMA table_info(stock_basic)").fetchall()
+    }
+    delist_dates = (
+        {
+            str(row["ts_code"]): str(row["delist_date"] or "")
+            for row in storage._conn.execute(
+                "SELECT ts_code, delist_date FROM stock_basic"
+            ).fetchall()
+        }
+        if "delist_date" in stock_columns
+        else {}
+    )
     basic = pd.read_sql_query(
         "SELECT ts_code, trade_date, pe_ttm, circ_mv, turnover_rate FROM daily_basic WHERE trade_date BETWEEN ? AND ?",
         storage._conn,
@@ -264,6 +286,16 @@ def build_stock_features(
                     if next_date is not None
                     else np.full(len(codes), np.nan)
                 ),
+                "return_next": (
+                    pct[next_date].values
+                    if next_date is not None
+                    else np.full(len(codes), np.nan)
+                ),
+                "execution_next": (
+                    ((closes[next_date] / opens[next_date]) - 1.0).values * 100.0
+                    if next_date is not None
+                    else np.full(len(codes), np.nan)
+                ),
             }
         )
         rows.append(frame)
@@ -277,11 +309,24 @@ def build_stock_features(
         is_st = name.str.upper().str.contains("ST", na=False) | name.str.contains("退", na=False)
         out = out[
             ~is_st
-            & ~symbol.str.startswith(("688", "689", "8", "4", "920"))
+            & ~symbol.str.startswith(("688", "689", "8", "4", "920", "200", "900"))
         ]
         symbol = out["ts_code"].str.split(".").str[0]
         limit = np.where(symbol.str.startswith("30"), 19.8, 9.8)
         out = out[out["ret1"] < limit - 0.2]
+        out = out[
+            (out["circ_mv"] >= 110.0)
+            & (out["pe_ttm"] > 0.0)
+            & (out["pe_ttm"] < 300.0)
+            & (out["amount20"] >= min_amount / 1e8)
+        ]
+        listed = pd.to_datetime(out["ts_code"].map(list_dates), format="%Y%m%d", errors="coerce")
+        delisted = pd.to_datetime(out["ts_code"].map(delist_dates), format="%Y%m%d", errors="coerce")
+        feature_dates = pd.to_datetime(out["date"], format="%Y%m%d", errors="coerce")
+        out = out[
+            ((feature_dates - listed).dt.days >= 60)
+            & (delisted.isna() | (feature_dates <= delisted))
+        ]
     out = out.dropna(
         subset=[
             "ret1", "ret5", "excess1", "excess5", "amount20",

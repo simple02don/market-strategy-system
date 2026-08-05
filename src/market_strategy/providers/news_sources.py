@@ -26,7 +26,10 @@ def _clean(text: Any) -> str:
 
 
 def _dedup_key(source: str, title: str) -> str:
-    return _hash(f"{source}:{title}")
+    """跨源标题去重键；source 参数仅为向后兼容保留。"""
+    del source
+    normalized = re.sub(r"[\W_]+", "", _clean(title).lower(), flags=re.UNICODE)
+    return _hash(normalized)
 
 
 class NewsCollector:
@@ -227,15 +230,33 @@ class NewsCollector:
         start_date: date,
         end_date: date,
     ) -> list[dict]:
+        return self.collect_with_status(start_dt, end_dt, start_date, end_date)["items"]
+
+    def collect_with_status(
+        self,
+        start_dt: str,
+        end_dt: str,
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, Any]:
         items: list[dict] = []
-        for fetcher in (
-            lambda: self.official_policies(),
-            lambda: self.tushare_major_news(start_dt, end_dt),
-            lambda: self.cninfo_announcements(start_date, end_date),
-        ):
+        status: dict[str, dict[str, Any]] = {}
+        fetchers = (
+            ("official", lambda: self.official_policies()),
+            ("news", lambda: self.tushare_major_news(start_dt, end_dt)),
+            ("disclosure", lambda: self.cninfo_announcements(start_date, end_date)),
+        )
+        for name, fetcher in fetchers:
             try:
-                items.extend(fetcher())
+                rows = fetcher()
+                items.extend(rows)
+                status[name] = {"ok": bool(rows), "count": len(rows), "error": ""}
             except Exception as exc:  # noqa: BLE001
+                status[name] = {
+                    "ok": False,
+                    "count": 0,
+                    "error": f"{type(exc).__name__}: {str(exc)[:200]}",
+                }
                 items.append(
                     {
                         "source": "collector_error",
@@ -249,4 +270,4 @@ class NewsCollector:
                         "dedup_key": _hash("collector_error"),
                     }
                 )
-        return items
+        return {"items": items, "status": status}

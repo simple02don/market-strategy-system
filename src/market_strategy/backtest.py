@@ -18,7 +18,13 @@ from .features.materialize import (
     build_sector_features,
     build_stock_features,
 )
-from .models.train import MARKET_FEATURES, SECTOR_FEATURES, STOCK_FEATURES, _lgb_params, _rank_ic
+from .models.train import (
+    MARKET_FEATURES,
+    SECTOR_FEATURES,
+    STOCK_FEATURES,
+    _daily_rank_ic,
+    _lgb_params,
+)
 from .storage import Storage
 from .timeutil import now_str
 
@@ -28,7 +34,7 @@ def _split(frame: pd.DataFrame, test_days: int) -> tuple[pd.DataFrame, pd.DataFr
     dates = frame["date"].unique()
     if len(dates) <= test_days:
         return pd.DataFrame(), frame
-    split_date = dates[-test_days - 1]
+    split_date = dates[-test_days]
     return frame[frame["date"] < split_date], frame[frame["date"] >= split_date]
 
 
@@ -39,7 +45,7 @@ def run_backtest(
     train_days: int = 400,
     test_days: int = 100,
     top_k: int = 10,
-    cost: float = 0.002,
+    cost_bps: float = 20.0,
 ) -> dict:
     market = build_market_features(storage, trade_date, days=train_days + test_days + 20)
     sector = build_sector_features(storage, trade_date, days=train_days + test_days + 20)
@@ -47,12 +53,16 @@ def run_backtest(
         storage,
         trade_date,
         days=train_days + test_days + 20,
-        min_amount=5e7,
+        min_amount=config.env_float("MIN_AMOUNT_20D", 1.5e8),
     )
     result: dict = {
         "trade_date": trade_date,
         "ran_at": now_str(),
-        "windows": {"train_days": train_days, "test_days": test_days},
+        "windows": {
+            "train_days": train_days,
+            "test_days": test_days,
+            "one_way_cost_bps": cost_bps,
+        },
     }
 
     # ---- 市场方向 ----
@@ -91,15 +101,17 @@ def run_backtest(
         pred = model.predict(sec_test[SECTOR_FEATURES].fillna(0.0))
         actual = sec_test["excess1_next"].values
         result["sector"] = {
-            "model_rank_ic": round(_rank_ic(pred, actual), 4),
-            "baseline_momentum_rank_ic": round(_rank_ic(sec_test["ret20"].values, actual), 4),
-            "baseline_reversal_rank_ic": round(_rank_ic(-sec_test["ret5"].values, actual), 4),
+            "model_daily_rank_ic": round(_daily_rank_ic(sec_test, pred, "excess1_next"), 4),
+            "baseline_momentum_daily_rank_ic": round(_daily_rank_ic(sec_test, sec_test["ret20"].values, "excess1_next"), 4),
+            "baseline_reversal_daily_rank_ic": round(_daily_rank_ic(sec_test, -sec_test["ret5"].values, "excess1_next"), 4),
             "test_rows": int(len(sec_test)),
         }
 
     # ---- 个股排序与组合 ----
-    stk_train, stk_test = _split(stock.dropna(subset=["residual_next"]), test_days)
-    if len(stk_test) >= 20000:
+    stk_train, stk_test = _split(
+        stock.dropna(subset=["residual_next", "execution_next"]), test_days
+    )
+    if len(stk_test) >= 5000 and stk_test["date"].nunique() >= 10:
         model = lgb.train(
             _lgb_params(),
             lgb.Dataset(stk_train[STOCK_FEATURES].fillna(0.0), label=stk_train["residual_next"]),
@@ -111,12 +123,14 @@ def run_backtest(
         mom_pred = stk_test["ret5"].values
         rev_pred = -stk_test["ret1"].values
         result["stock"] = {
-            "model_rank_ic": round(_rank_ic(pred, actual), 4),
-            "baseline_momentum_rank_ic": round(_rank_ic(mom_pred, actual), 4),
-            "baseline_reversal_rank_ic": round(_rank_ic(rev_pred, actual), 4),
+            "model_daily_rank_ic": round(_daily_rank_ic(stk_test, pred, "residual_next"), 4),
+            "baseline_momentum_daily_rank_ic": round(_daily_rank_ic(stk_test, mom_pred, "residual_next"), 4),
+            "baseline_reversal_daily_rank_ic": round(_daily_rank_ic(stk_test, rev_pred, "residual_next"), 4),
             "test_rows": int(len(stk_test)),
         }
-        result["stock"]["portfolio"] = _portfolio(stk_test, pred, mom_pred, top_k, cost)
+        result["stock"]["portfolio"] = _portfolio(
+            stk_test, pred, mom_pred, top_k, cost_bps
+        )
     return result
 
 
@@ -125,31 +139,53 @@ def _portfolio(
     pred: np.ndarray,
     baseline_pred: np.ndarray,
     top_k: int,
-    cost: float,
+    cost_bps: float,
 ) -> dict:
-    """每日取 Top-K，次日残差收益，扣除单边成本后汇总。"""
+    """每日等权 Top-K，按实际持仓变化扣单边成本，并复合净值。"""
     frame = test.copy()
     frame["pred"] = pred
     frame["base_pred"] = baseline_pred
     out = {"model": {}, "baseline_momentum": {}}
     for label, column in (("model", "pred"), ("baseline_momentum", "base_pred")):
         daily = []
+        previous_weights: dict[str, float] = {}
         for date, group in frame.groupby("date"):
             picks = group.nlargest(top_k, column)
+            if picks.empty:
+                continue
+            weight = 1.0 / len(picks)
+            current_weights = {str(code): weight for code in picks["ts_code"]}
+            codes = set(previous_weights) | set(current_weights)
+            turnover = sum(
+                abs(current_weights.get(code, 0.0) - previous_weights.get(code, 0.0))
+                for code in codes
+            )
+            cost_pp = turnover * cost_bps / 100.0
+            gross_return = float(picks["execution_next"].mean())
+            benchmark = float(group["execution_next"].mean())
+            net_excess = gross_return - benchmark - cost_pp
             daily.append(
                 {
                     "date": date,
-                    "excess": round(float(picks["residual_next"].mean()) - cost, 4),
+                    "gross_return": round(gross_return, 4),
+                    "benchmark_return": round(benchmark, 4),
+                    "turnover": round(turnover, 4),
+                    "cost": round(cost_pp, 4),
+                    "excess": round(net_excess, 4),
                     "mean_pred": round(float(picks[column].mean()), 4),
                 }
             )
+            previous_weights = current_weights
         series = pd.Series([item["excess"] for item in daily])
+        nav = (1.0 + series / 100.0).cumprod()
+        drawdown = nav / nav.cummax() - 1.0
         out[label] = {
             "days": int(len(series)),
             "mean_daily_excess": round(float(series.mean()), 4),
             "hit_rate": round(float((series > 0).mean()), 4),
-            "cum_excess": round(float(series.sum()), 4),
-            "max_drawdown": round(float((series.cumsum() - series.cumsum().cummax()).min()), 4),
+            "cum_excess": round(float((nav.iloc[-1] - 1.0) * 100.0), 4) if len(nav) else 0.0,
+            "max_drawdown": round(float(drawdown.min() * 100.0), 4) if len(drawdown) else 0.0,
+            "one_way_cost_bps": cost_bps,
             "daily_sample": daily[-10:],
         }
     return out

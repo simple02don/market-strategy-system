@@ -71,11 +71,15 @@ class TushareProvider:
 
     # ---- 股票池 ----
     def stock_basic(self) -> list[dict]:
-        rows = self.call(
-            "stock_basic",
-            {"list_status": "L"},
-            "ts_code,symbol,name,area,industry,market,list_date,list_status",
-        )
+        rows: list[dict] = []
+        for status in ("L", "D", "P"):
+            rows.extend(
+                self.call(
+                    "stock_basic",
+                    {"list_status": status},
+                    "ts_code,symbol,name,area,industry,market,list_date,delist_date,list_status",
+                )
+            )
         return rows
 
     # ---- 日线 / 复权 / 每日指标（按日期批量）----

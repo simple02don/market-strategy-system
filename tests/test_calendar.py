@@ -15,6 +15,11 @@ class FakeProvider:
         return [days[d] for d in sorted(days) if start <= d <= end]
 
 
+class FailingProvider:
+    def trade_cal(self, start: str, end: str):
+        raise RuntimeError("calendar unavailable")
+
+
 def test_next_trading_day_skips_weekend(tmp_path):
     storage = Storage(tmp_path / "test.db")
     cal = TradingCalendar(storage, FakeProvider())
@@ -33,4 +38,11 @@ def test_should_run_tonight_sunday_but_not_friday(tmp_path):
     run, target = cal.should_run_tonight(sunday)
     assert run is True
     assert target == date(2026, 8, 10)
+    storage.close()
+
+
+def test_missing_calendar_fails_closed_instead_of_assuming_weekday(tmp_path):
+    storage = Storage(tmp_path / "test.db")
+    cal = TradingCalendar(storage, FailingProvider())
+    assert cal.is_trading_day(date(2026, 8, 5)) is False
     storage.close()

@@ -37,14 +37,21 @@ def market_breadth(bars: pd.DataFrame, trade_date: str, window: int = 60) -> dic
     up = int((pct > 0).sum())
     down = int((pct < 0).sum())
     flat = int((pct == 0).sum())
-    limit_up = int((pct >= 9.8).sum() + (pct >= 19.8).sum())
-    limit_down = int((pct <= -9.8).sum() + (pct <= -19.8).sum())
+    symbols = today["ts_code"].astype(str).str.split(".").str[0]
+    limits = np.where(
+        symbols.str.startswith(("688", "689", "30")),
+        19.8,
+        np.where(symbols.str.startswith(("8", "4", "920")), 29.8, 9.8),
+    )
+    limit_up = int((pct.to_numpy() >= limits).sum())
+    limit_down = int((pct.to_numpy() <= -limits).sum())
 
     highs = bars.pivot_table(index="ts_code", columns="trade_date", values="high")
     lows = bars.pivot_table(index="ts_code", columns="trade_date", values="low")
     if trade_date in highs.columns:
-        high_window = highs[[c for c in highs.columns if c <= trade_date]].tail(window)
-        low_window = lows[[c for c in lows.columns if c <= trade_date]].tail(window)
+        date_columns = [c for c in highs.columns if c <= trade_date][-window:]
+        high_window = highs[date_columns]
+        low_window = lows[date_columns]
         if high_window.shape[1] >= 20:
             prior = high_window.iloc[:, :-1]
             new_high = int((high_window.iloc[:, -1] > prior.max(axis=1)).sum())
@@ -82,7 +89,8 @@ def market_context(
     if trade_date not in dates:
         return {"available": False, "reason": "date_not_in_history"}
     idx = dates.index(trade_date)
-    start = dates[max(0, idx - history_days + 1)]
+    # dates 为倒序；索引越大日期越早。
+    start = dates[min(len(dates) - 1, idx + history_days - 1)]
     bars = _load_bars(storage, start, trade_date)
     breadth = market_breadth(bars, trade_date)
 

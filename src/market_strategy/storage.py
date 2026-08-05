@@ -1,12 +1,13 @@
 """SQLite 存储：交易日历、股票池、日线、每日指标、新闻事实、预测日志。
 
-所有带时点的数据保存 PIT 字段：event_time / available_from / ingest_time /
-dataset_version，供回测与线上推断使用同一规则重放。
+带时点数据保存 available_from / ingest_time / dataset_version；资讯证据另存不可变
+evidence_snapshot。行情修订历史仍需后续版本化，因此当前不能宣称完整数据快照重放。
 """
 
 from __future__ import annotations
 
 import sqlite3
+import math
 from datetime import datetime
 from pathlib import Path
 
@@ -15,6 +16,16 @@ from .timeutil import now_str
 
 
 _now = now_str
+
+
+def _json_safe(value):
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 SCHEMA = """
@@ -33,6 +44,7 @@ CREATE TABLE IF NOT EXISTS stock_basic (
   industry TEXT,
   market TEXT,
   list_date TEXT,
+  delist_date TEXT,
   list_status TEXT,
   is_open INTEGER DEFAULT 1,
   ingest_time TEXT NOT NULL
@@ -93,6 +105,14 @@ CREATE TABLE IF NOT EXISTS news_item (
 CREATE INDEX IF NOT EXISTS idx_news_publish ON news_item(publish_time);
 CREATE INDEX IF NOT EXISTS idx_news_dedup ON news_item(dedup_key);
 
+CREATE TABLE IF NOT EXISTS news_impact (
+  source_id TEXT NOT NULL,
+  model_version TEXT NOT NULL,
+  assessment TEXT NOT NULL,
+  assessed_at TEXT NOT NULL,
+  PRIMARY KEY (source_id, model_version)
+);
+
 CREATE TABLE IF NOT EXISTS atomic_fact (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   document_id TEXT NOT NULL,
@@ -108,6 +128,9 @@ CREATE TABLE IF NOT EXISTS atomic_fact (
   ingest_time TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_fact_doc ON atomic_fact(document_id);
+CREATE INDEX IF NOT EXISTS idx_fact_identity ON atomic_fact(
+  document_id, subject, predicate, object, effective_time
+);
 
 CREATE TABLE IF NOT EXISTS run_log (
   run_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -134,9 +157,18 @@ CREATE TABLE IF NOT EXISTS prediction_log (
   model_version TEXT,
   category TEXT NOT NULL,
   entity TEXT,
+  is_formal INTEGER NOT NULL DEFAULT 0,
   payload TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_pred_trade ON prediction_log(trade_date);
+
+CREATE TABLE IF NOT EXISTS evidence_snapshot (
+  run_id INTEGER PRIMARY KEY,
+  target_trade_date TEXT NOT NULL,
+  information_cutoff TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS candidate_outcome (
   prediction_id INTEGER PRIMARY KEY,
@@ -148,6 +180,7 @@ CREATE TABLE IF NOT EXISTS candidate_outcome (
   industry_ret_next REAL,
   market_ret_next REAL,
   excess REAL,
+  measurement TEXT,
   recorded_at TEXT NOT NULL
 );
 """
@@ -160,7 +193,27 @@ class Storage:
         self._conn = sqlite3.connect(self.db_path)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
+        self._migrate_schema()
         self._conn.commit()
+
+    def _migrate_schema(self) -> None:
+        columns = {
+            str(row[1]) for row in self._conn.execute("PRAGMA table_info(stock_basic)").fetchall()
+        }
+        if "delist_date" not in columns:
+            self._conn.execute("ALTER TABLE stock_basic ADD COLUMN delist_date TEXT")
+        prediction_columns = {
+            str(row[1]) for row in self._conn.execute("PRAGMA table_info(prediction_log)").fetchall()
+        }
+        if "is_formal" not in prediction_columns:
+            self._conn.execute(
+                "ALTER TABLE prediction_log ADD COLUMN is_formal INTEGER NOT NULL DEFAULT 0"
+            )
+        outcome_columns = {
+            str(row[1]) for row in self._conn.execute("PRAGMA table_info(candidate_outcome)").fetchall()
+        }
+        if "measurement" not in outcome_columns:
+            self._conn.execute("ALTER TABLE candidate_outcome ADD COLUMN measurement TEXT")
 
     def close(self) -> None:
         self._conn.close()
@@ -215,18 +268,21 @@ class Storage:
                 """
                 INSERT INTO stock_basic(
                   ts_code, symbol, name, area, industry, market, list_date,
-                  list_status, is_open, ingest_time)
-                VALUES(?,?,?,?,?,?,?,?,1,?)
+                  delist_date, list_status, is_open, ingest_time)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(ts_code) DO UPDATE SET
                   name=excluded.name, area=excluded.area, industry=excluded.industry,
                   market=excluded.market, list_date=excluded.list_date,
-                  list_status=excluded.list_status, is_open=1,
+                  delist_date=excluded.delist_date,
+                  list_status=excluded.list_status, is_open=excluded.is_open,
                   ingest_time=excluded.ingest_time
                 """,
                 (
                     row["ts_code"], row.get("symbol", ""), row.get("name", ""),
                     row.get("area", ""), row.get("industry", ""), row.get("market", ""),
-                    row.get("list_date", ""), row.get("list_status", "L"), now,
+                    row.get("list_date", ""), row.get("delist_date", ""),
+                    row.get("list_status", "L"),
+                    int(row.get("list_status", "L") == "L"), now,
                 ),
             )
         self._conn.commit()
@@ -249,6 +305,29 @@ class Storage:
             if symbol.startswith("30") and not include_gem:
                 continue
             out.append((row["ts_code"], row["name"] or "", row["industry"] or ""))
+        return out
+
+    def listed_records(self, include_gem: bool = True) -> list[tuple[str, str, str, str]]:
+        """线上股票池，附上市日期供硬门槛判断。"""
+        rows = self._conn.execute(
+            """
+            SELECT ts_code, name, industry, list_date FROM stock_basic
+            WHERE list_status='L' AND is_open=1
+            """
+        ).fetchall()
+        out = []
+        for row in rows:
+            symbol = str(row["ts_code"]).split(".")[0]
+            if symbol.startswith(("688", "689", "8", "4", "920", "200", "900")):
+                continue
+            if symbol.startswith("30") and not include_gem:
+                continue
+            out.append(
+                (
+                    str(row["ts_code"]), str(row["name"] or ""),
+                    str(row["industry"] or ""), str(row["list_date"] or ""),
+                )
+            )
         return out
 
     # ---- 日线 / 每日指标 ----
@@ -389,7 +468,26 @@ class Storage:
         if not rows:
             return 0
         now = _now()
+        inserted = 0
         for row in rows:
+            exists = self._conn.execute(
+                """
+                SELECT 1 FROM atomic_fact
+                WHERE document_id=? AND subject=? AND predicate=? AND object=?
+                  AND COALESCE(effective_time,'')=COALESCE(?,'')
+                LIMIT 1
+                """,
+                (
+                    row["document_id"], row.get("subject", ""),
+                    row.get("predicate", ""), row.get("object", ""),
+                    row.get("effective_time", ""),
+                ),
+            ).fetchone()
+            if exists:
+                continue
+            verification = str(row.get("verification_status", "unverified"))
+            if verification not in {"verified", "unverified"}:
+                verification = "unverified"
             self._conn.execute(
                 """
                 INSERT INTO atomic_fact(
@@ -405,12 +503,94 @@ class Storage:
                     row.get("value"), row.get("unit", ""),
                     row.get("conditions", ""), row.get("effective_time", ""),
                     row.get("source_span", ""), row.get("sector_links", "[]"),
-                    row.get("verification_status", "unverified"),
+                    verification,
                     row.get("model_version", ""), now,
                 ),
             )
+            inserted += 1
         self._conn.commit()
-        return len(rows)
+        return inserted
+
+    def load_news_impacts(
+        self,
+        source_ids: list[str],
+        model_version: str,
+    ) -> dict[str, dict]:
+        if not source_ids:
+            return {}
+        import json
+
+        placeholders = ",".join("?" for _ in source_ids)
+        rows = self._conn.execute(
+            f"""
+            SELECT source_id, assessment FROM news_impact
+            WHERE model_version=? AND source_id IN ({placeholders})
+            """,
+            [model_version, *source_ids],
+        ).fetchall()
+        out = {}
+        for row in rows:
+            try:
+                value = json.loads(row["assessment"])
+            except (TypeError, ValueError):
+                continue
+            if isinstance(value, dict):
+                out[str(row["source_id"])] = value
+        return out
+
+    def save_news_impacts(
+        self,
+        assessments: dict[str, dict],
+        model_version: str,
+    ) -> int:
+        if not assessments:
+            return 0
+        import json
+
+        now = _now()
+        for source_id, assessment in assessments.items():
+            self._conn.execute(
+                """
+                INSERT INTO news_impact(source_id, model_version, assessment, assessed_at)
+                VALUES(?,?,?,?)
+                ON CONFLICT(source_id, model_version) DO UPDATE SET
+                  assessment=excluded.assessment, assessed_at=excluded.assessed_at
+                """,
+                (
+                    source_id,
+                    model_version,
+                    json.dumps(_json_safe(assessment), ensure_ascii=False, allow_nan=False),
+                    now,
+                ),
+            )
+        self._conn.commit()
+        return len(assessments)
+
+    def fact_document_ids(self, document_ids: list[str]) -> set[str]:
+        if not document_ids:
+            return set()
+        placeholders = ",".join("?" for _ in document_ids)
+        rows = self._conn.execute(
+            f"SELECT DISTINCT document_id FROM atomic_fact WHERE document_id IN ({placeholders})",
+            document_ids,
+        ).fetchall()
+        return {str(row[0]) for row in rows}
+
+    def facts_for_documents(self, document_ids: list[str]) -> list[dict]:
+        if not document_ids:
+            return []
+        placeholders = ",".join("?" for _ in document_ids)
+        rows = self._conn.execute(
+            f"""
+            SELECT document_id, source, publish_time, subject, predicate, object,
+                   value, unit, conditions, effective_time, source_span,
+                   sector_links, verification_status, model_version
+            FROM atomic_fact WHERE document_id IN ({placeholders})
+            ORDER BY id
+            """,
+            document_ids,
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     # ---- 运行与预测日志 ----
     def start_run(self, job: str, trade_date: str | None = None) -> int:
@@ -430,6 +610,7 @@ class Storage:
         run_id: int,
         status: str,
         *,
+        decision_time: str = "",
         information_cutoff: str = "",
         dataset_version: str = "",
         model_version: str = "",
@@ -438,13 +619,13 @@ class Storage:
     ) -> None:
         self._conn.execute(
             """
-            UPDATE run_log SET status=?, finished_at=?,
+            UPDATE run_log SET status=?, finished_at=?, decision_time=?,
               information_cutoff=?, dataset_version=?, model_version=?,
               code_commit=?, detail=?
             WHERE run_id=?
             """,
             (
-                status, _now(), information_cutoff, dataset_version,
+                status, _now(), decision_time or _now(), information_cutoff, dataset_version,
                 model_version, code_commit, detail, run_id,
             ),
         )
@@ -471,6 +652,7 @@ class Storage:
         category: str,
         entity: str,
         payload: dict,
+        is_formal: bool = False,
     ) -> None:
         import json
 
@@ -478,13 +660,45 @@ class Storage:
             """
             INSERT INTO prediction_log(
               run_id, trade_date, decision_time, information_cutoff,
-              dataset_version, model_version, category, entity, payload)
-            VALUES(?,?,?,?,?,?,?,?,?)
+              dataset_version, model_version, category, entity, is_formal, payload)
+            VALUES(?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 run_id, trade_date, decision_time, information_cutoff,
-                dataset_version, model_version, category, entity,
-                json.dumps(payload, ensure_ascii=False, default=str),
+                dataset_version, model_version, category, entity, int(is_formal),
+                json.dumps(
+                    _json_safe(payload),
+                    ensure_ascii=False,
+                    default=str,
+                    allow_nan=False,
+                ),
+            ),
+        )
+        self._conn.commit()
+
+    def save_evidence_snapshot(
+        self,
+        run_id: int,
+        target_trade_date: str,
+        information_cutoff: str,
+        payload: dict,
+    ) -> None:
+        import json
+
+        self._conn.execute(
+            """
+            INSERT INTO evidence_snapshot(
+              run_id, target_trade_date, information_cutoff, payload, created_at)
+            VALUES(?,?,?,?,?)
+            ON CONFLICT(run_id) DO UPDATE SET
+              payload=excluded.payload, information_cutoff=excluded.information_cutoff
+            """,
+            (
+                run_id,
+                target_trade_date,
+                information_cutoff,
+                json.dumps(_json_safe(payload), ensure_ascii=False, allow_nan=False),
+                _now(),
             ),
         )
         self._conn.commit()
@@ -494,7 +708,13 @@ class Storage:
             """
             SELECT id, trade_date, entity, payload FROM prediction_log
             WHERE category='candidate'
+              AND is_formal=1
               AND trade_date <= ?
+              AND id IN (
+                SELECT MAX(id) FROM prediction_log
+                WHERE category='candidate' AND is_formal=1
+                GROUP BY trade_date, entity
+              )
               AND id NOT IN (SELECT prediction_id FROM candidate_outcome)
             ORDER BY id
             """,
@@ -507,14 +727,15 @@ class Storage:
             """
             INSERT INTO candidate_outcome(
               prediction_id, ts_code, trade_date, tier, score,
-              ret_next, industry_ret_next, market_ret_next, excess, recorded_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?)
+              ret_next, industry_ret_next, market_ret_next, excess,
+              measurement, recorded_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 row["prediction_id"], row["ts_code"], row["trade_date"],
                 row.get("tier"), row.get("score"), row.get("ret_next"),
                 row.get("industry_ret_next"), row.get("market_ret_next"),
-                row.get("excess"), _now(),
+                row.get("excess"), row.get("measurement", ""), _now(),
             ),
         )
         self._conn.commit()
@@ -530,9 +751,24 @@ class Storage:
             """
         ).fetchone()
         n = int(row["n"] or 0)
+        tier_rows = self._conn.execute(
+            """
+            SELECT tier, COUNT(*) AS n, AVG(excess) AS mean_excess,
+                   SUM(CASE WHEN excess > 0 THEN 1 ELSE 0 END) AS win
+            FROM candidate_outcome GROUP BY tier
+            """
+        ).fetchall()
         return {
             "n": n,
             "mean_excess": round(float(row["mean_excess"] or 0.0), 4),
             "hit_rate": round(int(row["win"] or 0) / n, 4) if n else 0.0,
             "mean_ret": round(float(row["mean_ret"] or 0.0), 4),
+            "by_tier": {
+                str(item["tier"] or "unknown"): {
+                    "n": int(item["n"] or 0),
+                    "mean_excess": round(float(item["mean_excess"] or 0.0), 4),
+                    "hit_rate": round(int(item["win"] or 0) / int(item["n"]), 4),
+                }
+                for item in tier_rows if int(item["n"] or 0) > 0
+            },
         }

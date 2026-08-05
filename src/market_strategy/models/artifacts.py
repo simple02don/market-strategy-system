@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -35,8 +36,9 @@ def next_version() -> int:
 
 def save_artifacts(artifacts: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
     version = next_version()
-    directory = _root() / f"v{version}"
-    directory.mkdir(parents=True, exist_ok=True)
+    _root().mkdir(parents=True, exist_ok=True)
+    final_directory = _root() / f"v{version}"
+    directory = Path(tempfile.mkdtemp(prefix=f".v{version}_", dir=str(_root())))
     artifacts["market_lgbm"].save_model(str(directory / "market_lgbm.txt"))
     artifacts["sector_lgbm"].save_model(str(directory / "sector_lgbm.txt"))
     artifacts["stock_lgbm"].save_model(str(directory / "stock_lgbm.txt"))
@@ -48,11 +50,12 @@ def save_artifacts(artifacts: dict[str, Any], meta: dict[str, Any]) -> dict[str,
         json.dumps(artifacts["features"], ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    meta = dict(meta, version=version, directory=str(directory))
+    meta = dict(meta, version=version, directory=str(final_directory))
     (directory / "meta.json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2, default=str),
         encoding="utf-8",
     )
+    directory.replace(final_directory)
     return meta
 
 
@@ -60,20 +63,22 @@ def load_latest() -> dict[str, Any] | None:
     versions = list_versions()
     if not versions:
         return None
-    directory = _root() / f"v{versions[-1]}"
-    try:
-        features = json.loads((directory / "features.json").read_text(encoding="utf-8"))
-        meta = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
-        return {
-            "market_lgbm": lgb.Booster(model_file=str(directory / "market_lgbm.txt")),
-            "sector_lgbm": lgb.Booster(model_file=str(directory / "sector_lgbm.txt")),
-            "stock_lgbm": lgb.Booster(model_file=str(directory / "stock_lgbm.txt")),
-            "market_hmm": joblib.load(directory / "market_hmm.pkl"),
-            "market_scaler": joblib.load(directory / "market_scaler.pkl"),
-            "market_calibrator": joblib.load(directory / "market_calibrator.pkl"),
-            "stock_calibrator": joblib.load(directory / "stock_calibrator.pkl"),
-            "features": features,
-            "meta": meta,
-        }
-    except Exception:  # noqa: BLE001
-        return None
+    for version in reversed(versions):
+        directory = _root() / f"v{version}"
+        try:
+            features = json.loads((directory / "features.json").read_text(encoding="utf-8"))
+            meta = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
+            return {
+                "market_lgbm": lgb.Booster(model_file=str(directory / "market_lgbm.txt")),
+                "sector_lgbm": lgb.Booster(model_file=str(directory / "sector_lgbm.txt")),
+                "stock_lgbm": lgb.Booster(model_file=str(directory / "stock_lgbm.txt")),
+                "market_hmm": joblib.load(directory / "market_hmm.pkl"),
+                "market_scaler": joblib.load(directory / "market_scaler.pkl"),
+                "market_calibrator": joblib.load(directory / "market_calibrator.pkl"),
+                "stock_calibrator": joblib.load(directory / "stock_calibrator.pkl"),
+                "features": features,
+                "meta": meta,
+            }
+        except Exception:  # noqa: BLE001
+            continue
+    return None

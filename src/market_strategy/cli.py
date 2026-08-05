@@ -97,6 +97,7 @@ def cmd_nightly(args) -> int:
             latest,
             push=not args.no_push,
             dry_run=args.dry_run,
+            force=args.force,
         )
         print(json.dumps({k: v for k, v in result.items() if k != "market_context"}, ensure_ascii=False, indent=2, default=str))
         return 0 if result.get("status") in {"ok", "skip"} else 1
@@ -112,6 +113,21 @@ def cmd_train(args) -> int:
 def cmd_health(args) -> int:
     with Storage() as storage:
         latest = storage.latest_run("nightly")
+        payload = {}
+        if latest:
+            row = storage._conn.execute(
+                """
+                SELECT payload FROM prediction_log
+                WHERE run_id=? AND category='nightly_report'
+                ORDER BY id DESC LIMIT 1
+                """,
+                (latest["run_id"],),
+            ).fetchone()
+            if row:
+                try:
+                    payload = json.loads(row["payload"])
+                except (TypeError, ValueError):
+                    payload = {}
         counts = {
             "daily_rows": storage._conn.execute("SELECT COUNT(*) FROM daily_bar").fetchone()[0],
             "basic_rows": storage._conn.execute("SELECT COUNT(*) FROM daily_basic").fetchone()[0],
@@ -120,12 +136,37 @@ def cmd_health(args) -> int:
             "last_date": storage._conn.execute("SELECT MAX(trade_date) FROM daily_bar").fetchone()[0],
         }
         report_files = sorted(config.REPORT_DIR.glob("market_strategy_*.html")) if config.REPORT_DIR.exists() else []
-        healthy = bool(latest and latest.get("status") == "ok")
+        provider = TushareProvider()
+        calendar = TradingCalendar(storage, provider)
+        calendar_error = ""
+        try:
+            should_run, expected_day = calendar.should_run_tonight()
+        except Exception as exc:  # noqa: BLE001
+            should_run, expected_day = True, None
+            calendar_error = f"{type(exc).__name__}: {str(exc)[:200]}"
+        target_ok = (
+            not should_run
+            or (
+                latest
+                and expected_day
+                and latest.get("trade_date") == expected_day.strftime("%Y%m%d")
+            )
+        )
+        system_status = payload.get("system_status", "unknown")
+        healthy = bool(
+            latest
+            and latest.get("status") == "ok"
+            and target_ok
+            and (not should_run or system_status == "normal")
+        )
         result = {
             "status": "ok" if healthy else "alert",
             "latest_nightly": latest,
             "data": counts,
             "latest_report": report_files[-1].name if report_files else None,
+            "expected_target": expected_day.strftime("%Y%m%d") if expected_day else None,
+            "system_status": system_status,
+            "calendar_error": calendar_error,
         }
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
         if not healthy:
@@ -136,7 +177,7 @@ def cmd_health(args) -> int:
                 f"> 请检查 logs/run_nightly.log"
             )
             WeComPusher().send_markdown(alert)
-    return 0
+    return 0 if healthy else 1
 
 
 def cmd_track_outcomes(args) -> int:
@@ -159,6 +200,7 @@ def cmd_backtest(args) -> int:
             str(max_date),
             train_days=args.train_days,
             test_days=args.test_days,
+            cost_bps=args.cost_bps,
         )
         output = config.REPORT_DIR.parent / "backtest_latest.json"
         output.write_text(
@@ -182,6 +224,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-push", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--trade-date", help="强制以指定交易日为目标（测试用）")
+    p.add_argument("--force", action="store_true", help="允许覆盖同一目标日的正式运行防重门槛")
     p = sub.add_parser("train", help="模型训练（低峰自动运行）")
     p.add_argument("--trade-date")
     sub.add_parser("health", help="健康检查")
@@ -191,6 +234,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--trade-date")
     p.add_argument("--train-days", type=int, default=400)
     p.add_argument("--test-days", type=int, default=100)
+    p.add_argument("--cost-bps", type=float, default=20.0, help="单边交易成本（bp）")
     args = parser.parse_args(argv)
     config.ensure_dirs()
     return {

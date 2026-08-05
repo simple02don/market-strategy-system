@@ -22,8 +22,8 @@ $MARKER
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 0 23 * * * bash -lc 'cd $DIR && ./run.sh nightly $NIGHTLY_ARGS >> logs/cron_nightly.log 2>&1' $MARKER
-10 23 * * * bash -lc 'cd $DIR && ./run.sh track-outcomes >> logs/cron_track_outcomes.log 2>&1' $MARKER
-3 23 * * * bash -lc 'cd $DIR && ./run.sh health >> logs/cron_health.log 2>&1' $MARKER
+15 23 * * * bash -lc 'cd $DIR && ./run.sh track-outcomes >> logs/cron_track_outcomes.log 2>&1' $MARKER
+8 23 * * * bash -lc 'cd $DIR && ./run.sh health >> logs/cron_health.log 2>&1' $MARKER
 0 2 * * 6 bash -lc 'cd $DIR && ./run.sh train >> logs/cron_train.log 2>&1' $MARKER
 0 3 * * 6 bash -lc 'cd $DIR && ./run.sh backtest >> logs/cron_backtest.log 2>&1' $MARKER
 @reboot bash -lc 'cd $DIR && ./start_http.sh >> logs/auth_server.log 2>&1' $MARKER

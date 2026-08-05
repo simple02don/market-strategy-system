@@ -37,7 +37,7 @@ class TradingCalendar:
         local = self.storage.get_trade_cal(day)
         if local is not None:
             return local
-        # 缓存缺失时尝试刷新一次，仍失败则用工作日近似（周一至周五）。
+        # 缓存缺失时尝试刷新一次；仍失败必须 fail-closed，不能在法定假日误推。
         try:
             self.refresh(end=(day + timedelta(days=7)).strftime("%Y%m%d"))
             local = self.storage.get_trade_cal(day)
@@ -45,7 +45,7 @@ class TradingCalendar:
                 return local
         except Exception:
             pass
-        return day.weekday() < 5
+        return False
 
     def next_trading_day(self, day: date | str | None = None) -> date | None:
         """返回 day 之后（不含当日）的第一个交易日；不存在时返回 None。"""

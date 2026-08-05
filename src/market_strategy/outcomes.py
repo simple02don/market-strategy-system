@@ -6,6 +6,7 @@ import json
 
 import pandas as pd
 
+from . import config
 from .storage import Storage
 
 
@@ -19,17 +20,28 @@ def track_outcomes(storage: Storage, max_data_date: str) -> dict:
     for trade_date in dates:
         rows = pd.read_sql_query(
             """
-            SELECT ts_code, pct_chg FROM daily_bar WHERE trade_date = ?
+            SELECT ts_code, open, close FROM daily_bar WHERE trade_date = ?
             """,
             storage._conn,
             params=(trade_date,),
         )
         if rows.empty:
             continue
-        market_ret = float(rows["pct_chg"].mean())
+        rows["execution_return"] = (
+            pd.to_numeric(rows["close"], errors="coerce")
+            / pd.to_numeric(rows["open"], errors="coerce")
+            - 1.0
+        ) * 100.0
+        rows = rows.replace([float("inf"), float("-inf")], pd.NA).dropna(
+            subset=["execution_return"]
+        )
+        if rows.empty:
+            continue
+        market_ret = float(rows["execution_return"].mean())
         industry_ret = rows.groupby(
             rows["ts_code"].map(industry_of)
-        )["pct_chg"].mean()
+        )["execution_return"].mean()
+        roundtrip_cost_pp = config.env_float("OUTCOME_ROUNDTRIP_COST_BPS", 40.0) / 100.0
         for record in pending:
             if record["trade_date"] != trade_date:
                 continue
@@ -40,7 +52,7 @@ def track_outcomes(storage: Storage, max_data_date: str) -> dict:
             row = rows[rows["ts_code"] == record["entity"]]
             if row.empty:
                 continue
-            ret_next = float(row["pct_chg"].iloc[0])
+            ret_next = float(row["execution_return"].iloc[0])
             industry = industry_of(record["entity"])
             industry_ret_next = float(industry_ret.get(industry, market_ret))
             storage.upsert_outcome(
@@ -53,7 +65,8 @@ def track_outcomes(storage: Storage, max_data_date: str) -> dict:
                     "ret_next": ret_next,
                     "industry_ret_next": industry_ret_next,
                     "market_ret_next": market_ret,
-                    "excess": ret_next - industry_ret_next,
+                    "excess": ret_next - industry_ret_next - roundtrip_cost_pp,
+                    "measurement": "next_open_to_close_proxy_after_cost",
                 }
             )
             tracked += 1

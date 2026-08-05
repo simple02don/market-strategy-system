@@ -9,7 +9,11 @@ from __future__ import annotations
 from typing import Any
 
 
-def classify_market_state(context: dict[str, Any]) -> dict[str, Any]:
+def classify_market_state(
+    context: dict[str, Any],
+    *,
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if not context.get("available"):
         return {
             "available": False,
@@ -27,6 +31,10 @@ def classify_market_state(context: dict[str, Any]) -> dict[str, Any]:
     ret20 = context.get("ret_20d", 0.0)
     vol = context.get("volatility_annual", 0.0)
     amount_pct = context.get("amount_change_20d_pct", 0.0)
+    evidence = evidence or {}
+    sentiment = float(evidence.get("market_sentiment", 0.0) or 0.0)
+    evidence_confidence = float(evidence.get("confidence", 0.0) or 0.0)
+    evidence_risk = float(evidence.get("risk_score", 0.0) or 0.0)
 
     scores: dict[str, float] = {
         "上涨趋势": 0.0,
@@ -52,6 +60,15 @@ def classify_market_state(context: dict[str, Any]) -> dict[str, Any]:
         scores["流动性收缩"] += 18.0
     if ret20 < -0.08 and context.get("ret_5d", 0.0) > 0:
         scores["超跌修复"] += 15.0
+    evidence_strength = min(18.0, 18.0 * evidence_confidence)
+    scores["上涨趋势"] += max(0.0, sentiment) * evidence_strength
+    scores["下跌趋势"] += max(0.0, -sentiment) * evidence_strength * 0.6
+    scores["风险释放"] += (
+        max(0.0, -sentiment) * evidence_strength * 0.4
+        + evidence_risk * evidence_strength
+    )
+    if evidence.get("policy_intensity", 0.0) and abs(sentiment) < 0.35:
+        scores["震荡蓄势"] += float(evidence["policy_intensity"]) * 8.0
 
     total = sum(max(0.0, v) for v in scores.values()) or 1.0
     probs = {k: round(max(0.0, v) / total, 4) for k, v in scores.items()}
@@ -68,6 +85,9 @@ def classify_market_state(context: dict[str, Any]) -> dict[str, Any]:
             "new_low_60d": new_low,
             "ret_20d": ret20,
             "volatility_annual": vol,
+            "news_policy_sentiment": sentiment,
+            "evidence_confidence": evidence_confidence,
+            "evidence_risk": evidence_risk,
         },
         "model_version": "rule_v1",
     }
