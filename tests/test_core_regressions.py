@@ -304,14 +304,15 @@ def test_eastmoney_kline_parser_maps_and_computes_pct():
 def test_eastmoney_kline_parser_respects_date_window():
     rows = _parse_klines(
         [
-            "2026-07-31,3800.0,3798.0,3810.0,3790.0,100,100000",
-            "2026-08-03,3812.61,3809.66,3827.64,3797.64,100,100000",
+            "2026-07-31,3800.0,3798.0,3810.0,3790.0,100",
+            "2026-08-03,3812.61,3809.66,3827.64,3797.64,100",
         ],
         "000001.SH",
         "20260801",
         "20260805",
     )
     assert [row["trade_date"] for row in rows] == ["20260803"]
+    assert rows[0]["amount"] == 0.0
 
 
 def test_pipeline_uses_evidence_before_decision_and_can_be_normal(tmp_path, monkeypatch):
