@@ -212,7 +212,9 @@ class NightlyPipeline:
                 if fallback_td and fallback_td != latest_str:
                     # 最新交易日数据尚未发布/不完整：降级到库内最新交易日，显式标记。
                     update_result = self.update_market_data(fallback_td)
+                    update_result["requested_trade_date"] = latest_str
                     update_result["data_fallback"] = str(exc)
+                    latest_str = fallback_td
                 else:
                     raise
             dataset_version = str(update_result.get("dataset_version") or "")

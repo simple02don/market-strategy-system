@@ -53,6 +53,17 @@ class TushareProvider:
                 time.sleep(self.sleep * (attempt + 1) * 2)
         raise TushareError(f"{api_name} failed: {last_error}") from last_error
 
+    def _date_rows(self, api_name: str, trade_date: str, fields: str) -> list[dict]:
+        """按交易日取数；接口成功但返回空时短暂重试，避免瞬时空结果直接触发降级。"""
+        rows: list[dict] = []
+        for attempt in range(self.retry):
+            rows = self.call(api_name, {"trade_date": trade_date}, fields)
+            if rows:
+                return rows
+            if attempt + 1 < self.retry:
+                time.sleep(self.sleep * (attempt + 1) * 3)
+        return rows
+
     # ---- 交易日历 ----
     def trade_cal(self, start: str, end: str) -> list[dict]:
         rows = self.call(
@@ -84,23 +95,23 @@ class TushareProvider:
 
     # ---- 日线 / 复权 / 每日指标（按日期批量）----
     def daily_by_date(self, trade_date: str) -> list[dict]:
-        return self.call(
+        return self._date_rows(
             "daily",
-            {"trade_date": trade_date},
+            trade_date,
             "ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount",
         )
 
     def adj_factor_by_date(self, trade_date: str) -> list[dict]:
-        return self.call(
+        return self._date_rows(
             "adj_factor",
-            {"trade_date": trade_date},
+            trade_date,
             "ts_code,trade_date,adj_factor",
         )
 
     def daily_basic_by_date(self, trade_date: str) -> list[dict]:
-        return self.call(
+        return self._date_rows(
             "daily_basic",
-            {"trade_date": trade_date},
+            trade_date,
             (
                 "ts_code,trade_date,close,turnover_rate,turnover_rate_f,"
                 "volume_ratio,pe,pe_ttm,pb,total_share,float_share,free_share,"
