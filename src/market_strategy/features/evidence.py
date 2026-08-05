@@ -234,7 +234,8 @@ def build_evidence_bundle(
     }
     coverage = sum(source_groups.values()) / len(source_groups)
     volume_confidence = min(1.0, len(valid) / 30.0)
-    llm_coverage = len(assessments) / max(1, min(len(valid), 30))
+    valid_ids = {str(item.get("source_id") or "") for item in valid}
+    llm_coverage = sum(1 for item_id in valid_ids if item_id in assessments) / max(1, len(valid))
     confidence = min(1.0, 0.45 * coverage + 0.35 * volume_confidence + 0.20 * llm_coverage)
     sector_scores = {
         name: round(max(-1.0, min(1.0, sector_sum[name] / max(0.1, sector_weight[name]))), 4)

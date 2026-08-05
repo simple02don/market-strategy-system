@@ -152,10 +152,36 @@ def test_evidence_bundle_drives_market_sector_stock_and_operator_hypothesis():
     )
     assert bundle["available"] is True
     assert bundle["coverage"] == 1.0
+    assert round(bundle["impact_coverage"], 4) == round(2 / 3, 4)
     assert bundle["market_sentiment"] > 0
     assert bundle["sector_scores"]["半导体"] > 0
     assert bundle["stock_scores"]["300001"] > 0
     assert {row["name"] for row in bundle["operator_hypotheses"]} >= {"政策驱动轮动"}
+
+
+def test_impact_coverage_capped_to_window_and_ignores_extra_cached_ids():
+    items = [
+        _item("cls_telegraph", "n1", "标题", "2026-08-05 20:00:00"),
+        _item("govcn_policy", "p1", "政策", "2026-08-05 20:30:00", tier=1),
+    ]
+    impact = {
+        "status": "ok",
+        "assessments": {
+            "n1": {"market_impact": 0.1, "confidence": 0.5, "horizon": "next_day",
+                   "sectors": [], "stocks": [], "operator_signals": [], "rationale": ""},
+            # 历史缓存里的旧条目，不在本次窗口：不应抬高覆盖率
+            "stale_outside_window": {"market_impact": 0.1, "confidence": 0.5,
+                                     "horizon": "next_day", "sectors": [], "stocks": [],
+                                     "operator_signals": [], "rationale": ""},
+        },
+    }
+    bundle = build_evidence_bundle(
+        items,
+        window_start="2026-08-05 00:00:00",
+        information_cutoff="2026-08-05 23:00:00",
+        impact_result=impact,
+    )
+    assert bundle["impact_coverage"] == 0.5
 
 
 class _Predictor:
