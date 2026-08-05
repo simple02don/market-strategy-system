@@ -29,6 +29,7 @@ def rank_stocks(
     min_list_days = config.env_int("MIN_LIST_DAYS", 60)
     min_amount = config.env_float("MIN_AMOUNT_20D", 1.5e8)
     primary_max = config.env_int("PRIMARY_MAX", 3)
+    primary_max_same_industry = config.env_int("PRIMARY_MAX_SAME_INDUSTRY", 2)
     watch_max = config.env_int("WATCH_MAX", 5)
     primary_rule_min = config.env_float("PRIMARY_RULE_MIN_SCORE", 75.0)
     industry_excess = industry_excess or {}
@@ -144,10 +145,17 @@ def rank_stocks(
     out = []
     primary_count = 0
     watch_count = 0
+    primary_industry_counts: dict[str, int] = {}
     for _, row in passed.head(primary_max + watch_max + 3).iterrows():
-        if float(row["score"]) >= primary_rule_min and primary_count < primary_max:
+        industry = str(row["industry"] or "")
+        if (
+            float(row["score"]) >= primary_rule_min
+            and primary_count < primary_max
+            and primary_industry_counts.get(industry, 0) < primary_max_same_industry
+        ):
             tier = "primary"
             primary_count += 1
+            primary_industry_counts[industry] = primary_industry_counts.get(industry, 0) + 1
         elif watch_count < watch_max:
             tier = "watch"
             watch_count += 1

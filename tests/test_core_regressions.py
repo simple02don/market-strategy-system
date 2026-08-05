@@ -9,6 +9,7 @@ from market_strategy.backtest import _portfolio, _split
 from market_strategy.cli import _fallback_data_day, _resolve_latest_data_day
 from market_strategy.features.market import market_context
 from market_strategy.models.train import _four_way_date_split
+from market_strategy.models.stock_rank import rank_stocks
 from market_strategy.pipeline import (
     NightlyPipeline,
     _dataset_data_day,
@@ -188,6 +189,59 @@ def test_dedup_skips_only_when_existing_report_is_as_fresh():
     assert _existing_report_is_fresh(fresh, "20260806") is True
     assert _existing_report_is_fresh(stale, "20260806") is False
     assert _existing_report_is_fresh(None, "20260806") is True
+
+
+def test_primary_picks_are_industry_diversified(monkeypatch):
+    monkeypatch.setenv("PRIMARY_RULE_MIN_SCORE", "0")
+    dates = [f"2026080{i}" for i in range(1, 6)]
+    stocks = [
+        ("600001.SH", "黄金一号", "黄金", "20200101"),
+        ("600002.SH", "黄金二号", "黄金", "20200101"),
+        ("600003.SH", "黄金三号", "黄金", "20200101"),
+        ("600004.SH", "海运股份", "水运", "20200101"),
+        ("600005.SH", "化工股份", "化工", "20200101"),
+        ("600006.SH", "出版股份", "出版业", "20200101"),
+    ]
+    daily_pct = {
+        "600001.SH": [0.8, 0.9, 1.0, 1.5, 2.0],
+        "600002.SH": [0.7, 0.8, 0.9, 1.2, 1.6],
+        "600003.SH": [0.6, 0.7, 0.8, 1.0, 1.3],
+        "600004.SH": [0.2, 0.2, 0.3, 0.4, 0.5],
+        "600005.SH": [0.1, 0.1, 0.2, 0.3, 0.4],
+        "600006.SH": [0.05, 0.1, 0.1, 0.2, 0.3],
+    }
+    rows = []
+    for i, day in enumerate(dates):
+        for code, name, industry, list_date in stocks:
+            rows.append(
+                {
+                    "ts_code": code, "trade_date": day,
+                    "open": 10.0, "high": 10.5, "low": 9.8, "close": 10.2,
+                    "pre_close": 10.0, "pct_chg": daily_pct[code][i],
+                    "vol": 100.0, "amount": 200000.0,
+                }
+            )
+    bars = pd.DataFrame(rows)
+    basics = pd.DataFrame(
+        [
+            {"ts_code": code, "pe_ttm": 20.0, "circ_mv": 200e4, "turnover_rate": 2.0}
+            for code, *_ in stocks
+        ]
+    )
+    industry_excess = {"黄金": 0.13, "水运": 0.05, "化工": 0.02, "出版业": 0.01}
+    stock_evidence = {"600001": 0.5, "600002": 0.4, "600003": 0.3}
+    out = rank_stocks(
+        bars, basics, stocks, "20260805",
+        industry_excess=industry_excess, stock_evidence=stock_evidence,
+    )
+    primaries = [c for c in out if c["tier"] == "primary"]
+    assert len(primaries) == 3
+    industries = [c["industry"] for c in primaries]
+    assert industries.count("黄金") == 2
+    assert len(set(industries)) == 2
+    assert primaries[0]["ts_code"] == "600001.SH"
+    assert all(c["ts_code"] != "600003.SH" for c in primaries)
+    assert any(c["ts_code"] == "600003.SH" and c["tier"] == "watch" for c in out)
 
 
 def test_pipeline_uses_evidence_before_decision_and_can_be_normal(tmp_path, monkeypatch):
