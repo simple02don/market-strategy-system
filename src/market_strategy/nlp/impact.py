@@ -36,23 +36,8 @@ def _clip(value: Any, low: float, high: float, default: float = 0.0) -> float:
         return default
 
 
-def assess_news_impact(
-    items: list[dict[str, Any]],
-    *,
-    max_items: int | None = None,
-) -> dict[str, Any]:
-    """返回按 ``source_id`` 索引的有界结构化评估；失败时显式降级。"""
-    api_key = config.env_str("AI_PRIMARY_API_KEY")
-    if not api_key or not items:
-        return {"status": "unavailable", "assessments": {}, "error": "no_key_or_items"}
-    max_items = max_items or config.env_int("NLP_IMPACT_MAX_ITEMS", 30)
-    def time_rank(item: dict[str, Any]) -> float:
-        text = str(item.get("publish_time") or "").replace("T", " ")[:19]
-        try:
-            return datetime.strptime(text, "%Y-%m-%d %H:%M:%S").timestamp()
-        except ValueError:
-            return 0.0
-
+def select_priority_items(items: list[dict[str, Any]], max_items: int) -> list[dict[str, Any]]:
+    """按来源分组配额 + 层级 + 相关词 + 时间选择送评子集（与证据覆盖率共用）。"""
     groups: dict[str, list[dict[str, Any]]] = {"official": [], "news": [], "disclosure": []}
     for item in items:
         source = str(item.get("source") or "")
@@ -72,26 +57,48 @@ def assess_news_impact(
         text = f"{item.get('title', '')} {item.get('summary', '')}"
         return sum(1 for term in material_terms if term in text)
 
+    def time_rank(item: dict[str, Any]) -> float:
+        text = str(item.get("publish_time") or "").replace("T", " ")[:19]
+        try:
+            return datetime.strptime(text, "%Y-%m-%d %H:%M:%S").timestamp()
+        except ValueError:
+            return 0.0
+
+    quota = max(1, max_items // 3)
+    selected: list[dict[str, Any]] = []
+    for group in ("official", "news", "disclosure"):
+        selected.extend(
+            sorted(
+                groups[group],
+                key=lambda item: (
+                    int(item.get("tier", 5) or 5),
+                    -relevance(item),
+                    -time_rank(item),
+                ),
+            )[:quota]
+        )
+    if len(selected) < max_items:
+        selected_ids = {id(item) for item in selected}
+        remaining = [item for item in items if id(item) not in selected_ids]
+        selected.extend(
+            sorted(remaining, key=time_rank, reverse=True)[: max_items - len(selected)]
+        )
+    return selected
+
+
+def assess_news_impact(
+    items: list[dict[str, Any]],
+    *,
+    max_items: int | None = None,
+) -> dict[str, Any]:
+    """返回按 ``source_id`` 索引的有界结构化评估；失败时显式降级。"""
+    api_key = config.env_str("AI_PRIMARY_API_KEY")
+    if not api_key or not items:
+        return {"status": "unavailable", "assessments": {}, "error": "no_key_or_items"}
+    max_items = max_items or config.env_int("NLP_IMPACT_MAX_ITEMS", 30)
+
     def select_documents(max_n: int) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
-        quota = max(1, max_n // 3)
-        selected: list[dict[str, Any]] = []
-        for group in ("official", "news", "disclosure"):
-            selected.extend(
-                sorted(
-                    groups[group],
-                    key=lambda item: (
-                        int(item.get("tier", 5) or 5),
-                        -relevance(item),
-                        -time_rank(item),
-                    ),
-                )[:quota]
-            )
-        if len(selected) < max_n:
-            selected_ids = {id(item) for item in selected}
-            remaining = [item for item in items if id(item) not in selected_ids]
-            selected.extend(
-                sorted(remaining, key=time_rank, reverse=True)[: max_n - len(selected)]
-            )
+        selected = select_priority_items(items, max_n)
         documents: list[dict[str, Any]] = []
         allowed: dict[str, dict[str, Any]] = {}
         for item in selected:

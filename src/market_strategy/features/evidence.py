@@ -9,6 +9,9 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any
 
+from ..nlp.impact import select_priority_items
+from .. import config
+
 
 POSITIVE = {
     "增持": 1.0, "回购": 0.8, "中标": 0.7, "上调": 0.6, "增长": 0.45,
@@ -234,8 +237,11 @@ def build_evidence_bundle(
     }
     coverage = sum(source_groups.values()) / len(source_groups)
     volume_confidence = min(1.0, len(valid) / 30.0)
-    valid_ids = {str(item.get("source_id") or "") for item in valid}
-    llm_coverage = sum(1 for item_id in valid_ids if item_id in assessments) / max(1, len(valid))
+    priority = select_priority_items(
+        valid, config.env_int("NLP_IMPACT_MAX_ITEMS", 30)
+    )
+    priority_ids = {str(item.get("source_id") or "") for item in priority}
+    llm_coverage = sum(1 for item_id in priority_ids if item_id in assessments) / max(1, len(priority_ids))
     confidence = min(1.0, 0.45 * coverage + 0.35 * volume_confidence + 0.20 * llm_coverage)
     sector_scores = {
         name: round(max(-1.0, min(1.0, sector_sum[name] / max(0.1, sector_weight[name]))), 4)
