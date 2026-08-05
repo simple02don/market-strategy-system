@@ -11,6 +11,7 @@ from market_strategy.features.market import market_context
 from market_strategy.models.inference import infer_stocks
 from market_strategy.models.train import _four_way_date_split
 from market_strategy.models.stock_rank import rank_stocks
+from market_strategy.providers.index_fallback import _parse_klines
 from market_strategy.pipeline import (
     NightlyPipeline,
     _dataset_data_day,
@@ -278,6 +279,39 @@ def test_model_path_also_diversifies_primary_industries(monkeypatch):
     assert len(set(industries)) == 2
     assert all(c["ts_code"] != "600003.SH" for c in primaries)
     assert any(c["ts_code"] == "600003.SH" and c["tier"] == "watch" for c in out)
+
+
+def test_eastmoney_kline_parser_maps_and_computes_pct():
+    rows = _parse_klines(
+        [
+            "2026-08-03,3812.61,3809.66,3827.64,3797.64,524516960,952256890102.30",
+            "2026-08-04,3816.37,3822.28,3831.94,3799.52,540324922,1008382536905.40",
+        ],
+        "000001.SH",
+        "20260801",
+        "20260805",
+    )
+    assert len(rows) == 2
+    first, second = rows
+    assert first["trade_date"] == "20260803"
+    assert first["close"] == 3809.66
+    assert first["pre_close"] == first["open"]
+    assert round(first["amount"], 3) == 952256890.102
+    assert second["pre_close"] == 3809.66
+    assert round(second["pct_chg"], 4) == round((3822.28 / 3809.66 - 1) * 100, 4)
+
+
+def test_eastmoney_kline_parser_respects_date_window():
+    rows = _parse_klines(
+        [
+            "2026-07-31,3800.0,3798.0,3810.0,3790.0,100,100000",
+            "2026-08-03,3812.61,3809.66,3827.64,3797.64,100,100000",
+        ],
+        "000001.SH",
+        "20260801",
+        "20260805",
+    )
+    assert [row["trade_date"] for row in rows] == ["20260803"]
 
 
 def test_pipeline_uses_evidence_before_decision_and_can_be_normal(tmp_path, monkeypatch):

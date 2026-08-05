@@ -31,6 +31,7 @@ from .models.inference import (
 from .nlp.facts import extract_facts
 from .nlp.impact import assess_news_impact
 from .providers.news_sources import NewsCollector
+from .providers.index_fallback import fetch_index_daily
 from .providers.shared_cache import SharedCacheReader
 from .providers.tushare_provider import TushareProvider
 from .push.wecom import WeComPusher
@@ -131,8 +132,13 @@ class NightlyPipeline:
         end = trade_date
         start = (datetime.strptime(trade_date, "%Y%m%d") - timedelta(days=45)).strftime("%Y%m%d")
         index_payload: list[list[dict]] = []
+        index_fallback_used = False
         for code in ("000001.SH", "399001.SZ", "399006.SZ", "000300.SH", "000905.SH", "000852.SH"):
             rows = self.provider.index_daily(code, start, end)
+            if not rows:
+                rows = fetch_index_daily(code, start, end)
+                if rows:
+                    index_fallback_used = True
             if not rows:
                 raise RuntimeError(f"index_rows_empty:{code}")
             index_payload.append(rows)
@@ -154,6 +160,7 @@ class NightlyPipeline:
             "daily": n_daily,
             "basic": n_basic,
             "index": n_index,
+            "index_source": "eastmoney_fallback" if index_fallback_used else "tushare",
             "lhb": lhb_result,
             "trade_date": trade_date,
             "dataset_version": version,
