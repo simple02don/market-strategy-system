@@ -30,6 +30,16 @@ def _fallback_data_day(latest: date, max_data: str | None) -> str | None:
     return None
 
 
+def _resolve_latest_data_day(now: datetime, latest_trading_day) -> date | None:
+    """按数据可得时点解析“最近已完成行情日”。
+
+    日线数据通常在收盘后约 18:00 可得：在此之前当天不能作为行情日
+    （例如凌晨运行会把“今天”误判为最新行情日），之后当天才计入。
+    """
+    data_day = now.date() if now.hour >= 18 else now.date() - timedelta(days=1)
+    return latest_trading_day(data_day)
+
+
 def cmd_check_calendar(args) -> int:
     with Storage() as storage:
         provider = TushareProvider()
@@ -75,7 +85,7 @@ def cmd_nightly(args) -> int:
         today = now.date()
         if args.trade_date:
             next_day = datetime.strptime(args.trade_date, "%Y%m%d").date()
-            latest = pipe.calendar.latest_trading_day(next_day - timedelta(days=1))
+            latest = _resolve_latest_data_day(now, pipe.calendar.latest_trading_day)
             if latest is None:
                 print(json.dumps({"status": "failed", "error": "no_latest_trade_day"}))
                 return 1
@@ -89,7 +99,7 @@ def cmd_nightly(args) -> int:
                     )
                 )
                 return 0
-            latest = pipe.calendar.latest_trading_day(today)
+            latest = _resolve_latest_data_day(now, pipe.calendar.latest_trading_day)
             if latest is None:
                 print(json.dumps({"status": "failed", "error": "no_latest_trade_day"}))
                 return 1

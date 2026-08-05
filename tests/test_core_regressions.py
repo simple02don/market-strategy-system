@@ -1,11 +1,11 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import numpy as np
 import pandas as pd
 
 import market_strategy.pipeline as pipeline_module
 from market_strategy.backtest import _portfolio, _split
-from market_strategy.cli import _fallback_data_day
+from market_strategy.cli import _fallback_data_day, _resolve_latest_data_day
 from market_strategy.features.market import market_context
 from market_strategy.models.train import _four_way_date_split
 from market_strategy.pipeline import NightlyPipeline
@@ -162,6 +162,18 @@ def test_data_lag_fallback_keeps_latest_target_and_returns_db_max():
     assert _fallback_data_day(latest, "20260804") == "20260804"
     assert _fallback_data_day(latest, "20260805") is None
     assert _fallback_data_day(latest, None) is None
+
+
+def test_resolve_latest_data_day_is_time_aware():
+    calls = []
+
+    def fake_latest(day):
+        calls.append(day)
+        return day
+
+    assert _resolve_latest_data_day(datetime(2026, 8, 6, 0, 30), fake_latest) == date(2026, 8, 5)
+    assert _resolve_latest_data_day(datetime(2026, 8, 6, 23, 0), fake_latest) == date(2026, 8, 6)
+    assert calls == [date(2026, 8, 5), date(2026, 8, 6)]
 
 
 def test_pipeline_uses_evidence_before_decision_and_can_be_normal(tmp_path, monkeypatch):
