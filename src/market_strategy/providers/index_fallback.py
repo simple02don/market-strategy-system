@@ -31,7 +31,7 @@ def _parse_klines(
     out: list[dict[str, Any]] = []
     previous_close: float | None = None
     for line in klines:
-        parts = line.split(",")
+        parts = line.split(",") if isinstance(line, str) else list(line)
         if len(parts) < 6:
             continue
         trade_date = parts[0].replace("-", "")
