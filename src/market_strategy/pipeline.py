@@ -54,6 +54,24 @@ def _git_commit() -> str:
         return "unknown"
 
 
+def _dataset_data_day(payload: str | None) -> str | None:
+    """从预测 payload 的 dataset_version 提取数据日（live_YYYYMMDD_... / nightly_YYYYMMDD_...）。"""
+    try:
+        version = str(json.loads(payload or "{}").get("dataset_version") or "")
+        parts = version.split("_")
+        if len(parts) >= 2 and len(parts[1]) == 8 and parts[1].isdigit():
+            return parts[1]
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def _existing_report_is_fresh(payload: str | None, latest_str: str) -> bool:
+    """已有正式报告的数据日不旧于本次可用数据日时，才允许防重跳过。"""
+    data_day = _dataset_data_day(payload)
+    return data_day is None or data_day >= latest_str
+
+
 def _dataset_version(trade_date: str, label: str) -> str:
     return f"{label}_{trade_date}_{now_cst():%Y%m%d%H%M%S}"
 
@@ -184,7 +202,7 @@ class NightlyPipeline:
         if push and not dry_run and not force:
             existing = self.storage._conn.execute(
                 """
-                SELECT p.run_id FROM prediction_log p
+                SELECT p.run_id, p.payload FROM prediction_log p
                 JOIN run_log r ON r.run_id=p.run_id
                 WHERE p.trade_date=? AND p.category='nightly_report'
                   AND p.is_formal=1 AND r.status='ok'
@@ -192,11 +210,12 @@ class NightlyPipeline:
                 """,
                 (next_day_str,),
             ).fetchone()
-            if existing:
+            if existing and _existing_report_is_fresh(existing["payload"], latest_str):
                 return {
                     "status": "skip",
                     "reason": "formal_report_already_exists",
                     "run_id": int(existing["run_id"]),
+                    "existing_data_day": _dataset_data_day(existing["payload"]),
                     "next_trade_date": next_day_str,
                 }
         run_id = self.storage.start_run("nightly", next_day_str)

@@ -1,3 +1,4 @@
+import json
 from datetime import date, datetime, timedelta
 
 import numpy as np
@@ -8,7 +9,11 @@ from market_strategy.backtest import _portfolio, _split
 from market_strategy.cli import _fallback_data_day, _resolve_latest_data_day
 from market_strategy.features.market import market_context
 from market_strategy.models.train import _four_way_date_split
-from market_strategy.pipeline import NightlyPipeline
+from market_strategy.pipeline import (
+    NightlyPipeline,
+    _dataset_data_day,
+    _existing_report_is_fresh,
+)
 from market_strategy.report import generate_report
 from market_strategy.storage import Storage
 
@@ -174,6 +179,15 @@ def test_resolve_latest_data_day_is_time_aware():
     assert _resolve_latest_data_day(datetime(2026, 8, 6, 0, 30), fake_latest) == date(2026, 8, 5)
     assert _resolve_latest_data_day(datetime(2026, 8, 6, 23, 0), fake_latest) == date(2026, 8, 6)
     assert calls == [date(2026, 8, 5), date(2026, 8, 6)]
+
+
+def test_dedup_skips_only_when_existing_report_is_as_fresh():
+    stale = json.dumps({"dataset_version": "live_20260805_20260806000000"})
+    fresh = json.dumps({"dataset_version": "live_20260806_20260806230000"})
+    assert _dataset_data_day(stale) == "20260805"
+    assert _existing_report_is_fresh(fresh, "20260806") is True
+    assert _existing_report_is_fresh(stale, "20260806") is False
+    assert _existing_report_is_fresh(None, "20260806") is True
 
 
 def test_pipeline_uses_evidence_before_decision_and_can_be_normal(tmp_path, monkeypatch):
