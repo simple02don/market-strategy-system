@@ -117,6 +117,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         expiry = int(time.time()) + SESSION_SECONDS
         cookie_value = f"{expiry}:{_signature(expiry)}"
+        secure = "https" in self.headers.get("X-Forwarded-Proto", "").lower()
         self._send(
             302,
             b"",
@@ -125,6 +126,7 @@ class Handler(BaseHTTPRequestHandler):
                 "Set-Cookie": (
                     f"{COOKIE_NAME}={cookie_value}; Path=/; HttpOnly; "
                     f"Max-Age={SESSION_SECONDS}; SameSite=Lax"
+                    + ("; Secure" if secure else "")
                 ),
             },
         )

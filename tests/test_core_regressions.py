@@ -8,6 +8,7 @@ import market_strategy.pipeline as pipeline_module
 from market_strategy.backtest import _portfolio, _split
 from market_strategy.cli import _fallback_data_day, _resolve_latest_data_day
 from market_strategy.features.market import market_context
+from market_strategy.models.inference import infer_stocks
 from market_strategy.models.train import _four_way_date_split
 from market_strategy.models.stock_rank import rank_stocks
 from market_strategy.pipeline import (
@@ -240,6 +241,41 @@ def test_primary_picks_are_industry_diversified(monkeypatch):
     assert industries.count("黄金") == 2
     assert len(set(industries)) == 2
     assert primaries[0]["ts_code"] == "600001.SH"
+    assert all(c["ts_code"] != "600003.SH" for c in primaries)
+    assert any(c["ts_code"] == "600003.SH" and c["tier"] == "watch" for c in out)
+
+
+class _FakePredictor:
+    def predict(self, values):
+        return np.array([1.0] * len(values))
+
+
+def test_model_path_also_diversifies_primary_industries(monkeypatch):
+    monkeypatch.setenv("MIN_PRIMARY_SCORE", "0")
+    monkeypatch.setenv("MIN_PRIMARY_PROB", "0")
+    models = {
+        "features": {"stock": ["ret1"]},
+        "stock_lgbm": _FakePredictor(),
+        "stock_calibrator": _FakePredictor(),
+    }
+    stock_last = [
+        {"ts_code": f"60000{i}.SH", "ret1": 1.0}
+        for i in range(1, 7)
+    ]
+    candidates = [
+        {"ts_code": "600001.SH", "name": "黄金一号", "industry": "黄金", "score": 96.0, "tier": "primary", "evidence_score": 0.5},
+        {"ts_code": "600002.SH", "name": "黄金二号", "industry": "黄金", "score": 92.0, "tier": "primary", "evidence_score": 0.4},
+        {"ts_code": "600003.SH", "name": "黄金三号", "industry": "黄金", "score": 88.0, "tier": "primary", "evidence_score": 0.3},
+        {"ts_code": "600004.SH", "name": "海运股份", "industry": "水运", "score": 83.0, "tier": "watch", "evidence_score": 0.0},
+        {"ts_code": "600005.SH", "name": "化工股份", "industry": "化工", "score": 79.0, "tier": "watch", "evidence_score": 0.0},
+        {"ts_code": "600006.SH", "name": "出版股份", "industry": "出版业", "score": 77.0, "tier": "watch", "evidence_score": 0.0},
+    ]
+    out = infer_stocks(models, stock_last, candidates)
+    primaries = [c for c in out if c["tier"] == "primary"]
+    industries = [c["industry"] for c in primaries]
+    assert len(primaries) == 3
+    assert industries.count("黄金") == 2
+    assert len(set(industries)) == 2
     assert all(c["ts_code"] != "600003.SH" for c in primaries)
     assert any(c["ts_code"] == "600003.SH" and c["tier"] == "watch" for c in out)
 

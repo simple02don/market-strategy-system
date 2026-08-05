@@ -102,7 +102,7 @@ class NightlyPipeline:
         fresh = False
         if row and row["t"]:
             try:
-                fresh = datetime.now() - datetime.strptime(row["t"], "%Y-%m-%d %H:%M:%S") < timedelta(days=5)
+                fresh = now_cst() - datetime.strptime(row["t"], "%Y-%m-%d %H:%M:%S") < timedelta(days=5)
             except ValueError:
                 fresh = False
         if fresh and not force:
@@ -651,6 +651,6 @@ class NightlyPipeline:
             f"> 主推荐：{pick_text}\n"
             f"> 系统状态：{payload.get('system_status')}\n"
             f"> 决策时点 {payload.get('decision_time')} · 信息截止 {payload.get('information_cutoff')}\n"
-            f"> [完整日报]({link})（需先连 WireGuard）\n"
+            f"> [完整日报]({link})（公网/内网均可打开）\n"
             "> 仅供研究推演，不构成投资建议；不自动下单。"
         )

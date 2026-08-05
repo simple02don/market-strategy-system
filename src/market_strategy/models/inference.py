@@ -178,6 +178,7 @@ def infer_stocks(
     features = models["features"]["stock"]
     rows = {row["ts_code"]: row for row in stock_last}
     primary_max = config.env_int("PRIMARY_MAX", 3)
+    primary_max_same_industry = config.env_int("PRIMARY_MAX_SAME_INDUSTRY", 2)
     watch_max = config.env_int("WATCH_MAX", 5)
     min_primary_score = config.env_float("MIN_PRIMARY_SCORE", 62.0)
     min_primary_prob = config.env_float("MIN_PRIMARY_PROB", 0.52)
@@ -214,14 +215,18 @@ def infer_stocks(
     out.sort(key=lambda item: item["score"], reverse=True)
     primary_count = 0
     watch_count = 0
+    primary_industry_counts: dict[str, int] = {}
     for item in out:
+        industry = str(item.get("industry") or "")
         if (
             primary_count < primary_max
             and float(item.get("score", 0.0)) >= min_primary_score
             and float(item.get("prob_positive", 0.0)) >= min_primary_prob
+            and primary_industry_counts.get(industry, 0) < primary_max_same_industry
         ):
             item["tier"] = "primary"
             primary_count += 1
+            primary_industry_counts[industry] = primary_industry_counts.get(industry, 0) + 1
         elif watch_count < watch_max and float(item.get("score", 0.0)) >= min_watch_score:
             item["tier"] = "watch"
             watch_count += 1

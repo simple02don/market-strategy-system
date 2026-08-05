@@ -64,6 +64,17 @@ class TushareProvider:
                 time.sleep(self.sleep * (attempt + 1) * 3)
         return rows
 
+    def _range_rows(self, api_name: str, params: dict, fields: str) -> list[dict]:
+        """区间取数；成功但返回空时短暂重试。"""
+        rows: list[dict] = []
+        for attempt in range(self.retry):
+            rows = self.call(api_name, params, fields)
+            if rows:
+                return rows
+            if attempt + 1 < self.retry:
+                time.sleep(self.sleep * (attempt + 1) * 3)
+        return rows
+
     # ---- 交易日历 ----
     def trade_cal(self, start: str, end: str) -> list[dict]:
         rows = self.call(
@@ -120,7 +131,7 @@ class TushareProvider:
         )
 
     def index_daily(self, ts_code: str, start: str, end: str) -> list[dict]:
-        return self.call(
+        return self._range_rows(
             "index_daily",
             {"ts_code": ts_code, "start_date": start, "end_date": end},
             "ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount",
