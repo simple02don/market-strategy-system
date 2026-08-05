@@ -1,65 +1,157 @@
 # A股主力策略情景推演与分层选股系统 · 接手文件
 
-> 最后核验时间：2026-08-05 01:30
-> GitHub：`simple02don/market-strategy-system`（私有；2026-08-05 已通过本机 SSH
->  公钥 `~/.ssh/github_simple02don_ed25519` 推送成功，smoke CI 通过）
-> 生产：`root@43.136.54.243:/home/ubuntu/market-strategy-system`（ubuntu 运行）
+> 最后核验时间：2026-08-06 03:40 CST
+> 本文件是“接手入口”，详细规则见 [AGENTS.md](../AGENTS.md)，功能与验收分期见
+> [REPAIR_PHASES.md](REPAIR_PHASES.md)，定位与用法见 [README.md](../README.md)。
+> 敏感信息（token/密码/webhook/key）一律不写入本文件；真实值只在生产 `.env`。
 
-## 1. 系统定位
+## 1. 当前状态速览
 
-- 每日 23:00（仅“下一自然日为交易日”时）生成次日全景概率推演：市场状态 →
-  次日情景 → 板块职责 → 个股 0-3 主推荐，并通过企业微信推送。
-- 与 JCKX Tail Overnight 完全独立：不 import 其代码、不写其数据目录、不用其
-  锁名/cron。只读复用其事件缓存与分钟档案，且必须带版本校验和直连兜底。
-- 只读复用共享凭据：Tushare token、企业微信 webhook、JCKX 报告密码、DeepSeek key。
-- 只输出研究推演，不自动下单，不构成投资建议。
-
-## 2. 当前状态
-
-| 项目 | 状态 |
+| 项 | 状态 |
 |---|---|
-| 部署 | `/home/ubuntu/market-strategy-system`，venv 独立，`.env` 600 |
-| 调度 | 23:00 `nightly`（已开启推送）；23:03 health；23:10 track-outcomes；周六 02:00 train / 03:00 backtest |
-| 数据 | Tushare 3 年回灌（725 交易日 / 390 万日线 / 390 万每日指标 / 指数），PIT 字段已建 |
-| 新闻/事实 | 财联社(Tushare)/巨潮/政府网/部委多源；DeepSeek 原子事实抽取可用 |
-| 模型 | HMM + LightGBM + Isotonic 校准 v2 已训练并上线（个股 RankIC 0.046，可执行宇宙 175 万行） |
-| 回测 | 2026-08-05 首次回测（可执行宇宙、100 天样本外）：市场方向 Brier 0.324 暂劣于无条件基线；板块 RankIC 0.018；个股 RankIC 0.042 优于动量/反转基线；Top10 组合日均超额 -0.13%（成本后），动量基线 -0.84%。结论：个股排序有弱信号，市场方向与组合净值尚未跑赢成本，继续影子验证 |
-| 推送 | 2026-08-05 01:27 首次真实推送成功（8/6 报告，11 只候选） |
-| 报告服务 | `127.0.0.1:8082`，nginx `/strategy/` 反代，JCKX 密码登录，WireGuard 内网 |
-| 原系统 | 未改动（nginx 仅新增 location，配置备份 `/root/nginx_jckx-reports.bak.20260804`） |
+| 代码 | 本地 HEAD `7ebd4e3`，GitHub `simple02don/market-strategy-system` main 同步；生产部署提交 `e118d88`（tar 部署，生产 git HEAD 与代码一致） |
+| 测试 | 38 个全过（本地 Python 3.10 venv + 生产 Python 3.12 venv） |
+| 生产 | `/home/ubuntu/market-strategy-system`（ubuntu 运行，`.env` 权限 600），`root@43.136.54.243`（ssh 别名 `jckx-prod`，密钥 `~/.ssh/jckx_prod_ed25519`） |
+| 数据 | SQLite `data/market_strategy.sqlite3`，最新行情日 20260805（2026-08-06 晚间将自动补 20260806） |
+| 模型 | `models/artifacts/v1`、`v2`（gitignored）；v2 组件未获批准 → 线上走规则基线 `rule_v1` |
+| 推送 | 企业微信 webhook 正常；8/7 报告已推送（run 21，8/5 数据版）；今晚 23:00 会用 8/6 数据再推一次（数据新鲜度防重保证不会被跳过） |
+| 报告访问 | 公网 HTTPS `https://43.136.54.243/strategy/`（登录密码 + 限速），WireGuard 内网 `http://10.66.0.1/strategy/` 仍可用 |
+| 证书 | Let's Encrypt 短效 IP 证书已续期（8/12 到期），每 6 小时自动续期并 reload nginx |
 
-## 3. 常用命令
+## 2. 常用命令
 
+本地（`PYTHONPATH=src`）：
 ```bash
-cd /home/ubuntu/market-strategy-system
-./run.sh check-calendar        # 明天是否交易日、今晚是否运行
-./run.sh data-update --trade-date YYYYMMDD
-./run.sh nightly --no-push     # 生成报告不推送（自检）
-./run.sh train                 # 模型训练（周六自动）
-./run.sh health
+PYTHONPATH=src ./venv/bin/python -m pytest tests/ -q
+PYTHONPATH=src ./venv/bin/python -m market_strategy.cli check-calendar
 ```
 
-## 4. 数据与模型
+生产（`run.sh` 已自动加载 `.env` 并用 ubuntu 身份执行）：
+```bash
+ssh jckx-prod
+cd /home/ubuntu/market-strategy-system
+./run.sh check-calendar        # 今晚是否运行
+./run.sh nightly --no-push     # 干跑（不推送，不写正式预测）
+./run.sh nightly --force       # 强制重跑（绕过防重，正式推送）
+./run.sh health                # 健康检查（23:08 自动跑）
+./run.sh track-outcomes        # 结果跟踪 + 分钟级回放（23:15 自动跑）
+./run.sh train                 # 周六 02:00 自动训练
+./run.sh train-log             # 训练实验记录（P1-5 新增）
+./run.sh backtest              # 周六 03:00 自动回测
+```
 
-- SQLite：`data/market_strategy.sqlite3`（交易日历/日线/每日指标/新闻/事实/预测日志）。
-- 模型产物：`models/artifacts/v{n}`（LightGBM txt + HMM/校准器 joblib + meta.json），
-  23:00 只加载最新版本推理；冠军/挑战者机制：样本外指标不劣于现有才替换。
-- 训练与推理分离：训练在低峰时段自动运行，不在 23:00 任务内训练。
-- 时间一律 Asia/Shanghai（`timeutil.now_cst`），报告记录 decision_time / information_cutoff /
-  dataset_version / model_version / code_commit。
+## 3. 架构与数据
 
-## 5. 关键约束
+主链路（23:00，仅“下一自然日为交易日”时）：
+```
+日历判定 → 数据更新（日线/指标/指数/龙虎榜，Tushare 为主，
+           指数回退腾讯，龙虎榜失败只降级不阻塞）
+→ 新闻/政策/公告多源采集 → PIT 过滤与跨源去重
+→ DeepSeek 有界影响评估（词典降级 + 截断重试）
+→ 证据融合（含龙虎榜资金面）→ 市场状态 → 次日情景 → 板块 → 个股
+→ 主推荐行业分散（同行业≤2）→ HTML 报告 → 企业微信推送（公网链接）
+```
 
-- 免费数据源缺失/不兼容时必须回退自拉，共享只是优化不是依赖。
-- 数据失败推“失败说明”，进入降级/弃权，不静默。
-- 禁止为出票放低硬门槛（市值≥110亿、PE 0-300、主板+创业板、剔除 ST/科创板/
-  北交所/停牌/一字板/上市不足60日）。
-- 收假前夜运行必须纳入整个假期资讯窗口，并标注最近行情日陈旧天数。
-- 不打印 `.env`/token/webhook 正文。
+核心表（`Storage` 自动建表/迁移）：
+`trade_cal / stock_basic / daily_bar / daily_basic / index_daily /
+lhb_daily / lhb_inst / news_item / news_impact / atomic_fact /
+run_log / prediction_log / evidence_snapshot / candidate_outcome /
+execution_replay / minute_bar / train_experiment`
 
-## 6. 待办
+模型产物：`models/artifacts/v{n}`，训练写临时目录后原子发布；冠军/挑战者机制，
+组件级批准（`meta.component_status`），未批准组件线上回退规则。
 
-- GitHub 已就绪（SSH 公钥推送 + smoke CI）；后续发布沿用“本地提交 → GitHub → 服务器 rsync 部署”。
-- 市场方向模型改进（当前 Brier 劣于无条件基线，暂不作为主决策依据）。
-- 组合成本后净值跟踪：连续样本窗口验证个股 RankIC 是否能转化为可执行收益。
-- 降级状态机（facts_only/abstain）细节完善与告警分级。
+## 4. 已实现功能（按最近工作）
+
+- 资讯成为决策证据：严格 `information_cutoff`、跨源去重、LLM 有界影响评估、
+  词典兜底、`evidence_snapshot` 存档（阶段 1）
+- 线上正确性与降级：`facts_only` / `abstain` 取消主推荐；硬门槛
+  （市值/PE/上市天数/成交额/ST/科创板/北交所/一字板）；NaN 清理（阶段 2）
+- 训练/回测/晋级：四段切分、每日横截面 RankIC、成本后 Top-K、组件批准、
+  原子发布与回退（阶段 3）
+- 数据日解析按“数据可得时点”（18:00 前用前一交易日），防重按数据新鲜度比较，
+  凌晨手动运行不会挡今晚 23:00 正式运行
+- 龙虎榜资金面：`top_list`/`top_inst` 入库、按行业聚合、进入操盘假设与报告
+- 操盘假设对抗化：每个假设带支持/反证/最强反证/为何未采纳/次日验证
+- 主推荐行业分散：`PRIMARY_MAX_SAME_INDUSTRY=2`（规则与模型两条路径都生效）
+- 指数回退源：Tushare → 腾讯日 K（东财会拦截 python requests，已弃用）
+- 分钟级回放：Tushare `stk_mins`（主）→ 新浪（当日）→ 东财 curl（兜底）；
+  23:15 对到期候选回放“高开≤3% 且 15 分钟站稳分时均线”等确认/取消条件
+- 训练实验记录：`train_experiment` 表 + `train-log`；市场模型 walk-forward
+  稳定性指标（8 折，暂只参考不进晋级门槛）
+- 公网报告：nginx 443 HTTPS（仅 `/strategy/`，登录+限速，Secure cookie），
+  80 口 ACME 验证；WireGuard 路径不变，JCKX 原报告仍仅内网
+
+## 5. 生产环境要点
+
+- `.env` 需要的键（值只在生产）：`TUSHARE_TOKEN / WECOM_WEBHOOK /
+  JCKX_PASSWORD / JCKX_TOKEN / AI_PRIMARY_API_KEY / AI_PRIMARY_BASE_URL /
+  AI_PRIMARY_MODEL / SHARED_EVENT_CACHE_DIR / SHARED_MINUTE_HISTORY_DIR /
+  PRIMARY_MAX / PRIMARY_MAX_SAME_INDUSTRY / WATCH_MAX / MIN_* / NLP_* /
+  JCKX_REPORT_BASE_URL` 等，完整见 `.env.example`
+- 共享只读 JCKX 缓存：`/home/ubuntu/jckx-tail-overnight/cache`（事件 pickle，
+  带版本校验）；`data/minute_history` 只有指数分钟，无个股分钟
+- nginx：`0.0.0.0:443`（公网 `/strategy/`）、`0.0.0.0:80`（ACME+跳转）、
+  WireGuard `10.66.0.1:80`（JCKX 8081 + strategy 8082）；ufw 放行 22/80/443/51820
+- 云安全组：22、80、443、51820/udp 已放行
+- auth_server：`127.0.0.1:8082`，`logs/auth_server.pid` + 每 5 分钟看门狗
+- cron（ubuntu）：23:00 nightly（推送）、23:08 health、23:15 track-outcomes、
+  周六 02:00 train、周六 03:00 backtest、auth 看门狗
+
+## 6. 在新电脑继续开发
+
+```bash
+git clone git@github.com:simple02don/market-strategy-system.git
+cd market-strategy-system
+python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
+cp .env.example .env          # 从生产抄真实值：ssh jckx-prod 'cat /home/ubuntu/market-strategy-system/.env'
+PYTHONPATH=src ./venv/bin/python -m pytest tests/ -q   # 期望 38 passed
+```
+
+注意：
+- macOS（Intel）上 lightgbm 需要 OpenMP：把 `libomp.dylib` 放到
+  `/usr/local/opt/libomp/lib/libomp.dylib`（可从 conda-forge osx-64
+  `llvm-openmp` 包提取，或用 Homebrew bottle；本机已装）
+- 本地没有生产数据时，可 `scp` 生产 `data/market_strategy.sqlite3` 回来做只读
+  分析，或 `./run.sh data-backfill --years 1` 重新拉（慢）
+- GitHub 推送用 `GIT_SSH_COMMAND="ssh -i ~/.ssh/github_simple02don_ed25519 -o IdentitiesOnly=yes"`
+
+## 7. 发布/部署流程（当前实践）
+
+```bash
+# 本地
+PYTHONPATH=src ./venv/bin/python -m pytest tests/ -q
+git add -A && git commit -m "..." && git push origin main
+git diff --name-only HEAD~1 | tar -czf /tmp/mss.tar.gz -T -
+scp /tmp/mss.tar.gz jckx-prod:/tmp/
+# 生产
+ssh jckx-prod 'runuser -u ubuntu -- sh -c "cd /home/ubuntu/market-strategy-system && tar -xzf /tmp/mss.tar.gz && PYTHONPATH=src ./venv/bin/python -m pytest tests/ -q && git add -A && git -c user.name=deploy -c user.email=deploy@local commit -m \"deploy: ...\" "'
+# 若改了 auth_server.py：重启
+ssh jckx-prod 'runuser -u ubuntu -- sh -c "pkill -u ubuntu -f auth_server.py; sleep 1; rm -f /home/ubuntu/market-strategy-system/logs/auth_server.pid; cd /home/ubuntu/market-strategy-system && ./start_http.sh"'
+```
+
+验收顺序（来自 REPAIR_PHASES.md）：隔离目录全量测试 → 生产测试 →
+`nightly --no-push` 干跑 → 核查报告（system_status/证据/无 NaN）→ 再恢复正式推送。
+
+## 8. 已知边界与待办
+
+- 资讯增量 A/B（有新闻 vs 无新闻）需 60 个正式交易日数据；分钟回放首条结果
+  将在 2026-08-07 收盘后产生
+- 历史 ST 名称/行业变更仍非完整 PIT；行情修订历史未版本化
+- walk-forward 指标暂不进晋级门槛，观察几周后考虑
+- 个股日线的多源回退未做（当前 Tushare 重试 + 库内降级）
+- 18:00 数据可得阈值是启发式；凌晨边界运行可能走降级（安全）
+- 共享缓存事件 source_id 临时化，可能重复送 LLM 评估（成本提示）
+
+## 9. 建议技能（给接手 Agent）
+
+- `diagnosing-bugs`：系统运行异常时先走诊断循环
+- `tdd`：新增/修复功能时测试先行（仓库已有较完整回归测试）
+- `self-improvement`：出现意外失败或纠正时记录教训
+- `handoff`：本会话继续交接时重新生成交接文档
+
+## 10. 近期提交（可作改动依据）
+
+`7ebd4e3` walk-forward；`d4b7ccd` 训练实验记录；`2546946` 分钟回放；
+`d322c01`/`bf45c1f` 指数回退；`1543595` 龙虎榜证据；`57f1071` 公网认证加固；
+`b51980a` 行业分散；`44f5c25` 数据新鲜度防重；`5b2993c`/`445e996` 覆盖率修复。
