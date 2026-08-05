@@ -17,6 +17,7 @@ from .features.materialize import (
     build_stock_features,
 )
 from .features.evidence import build_evidence_bundle, canonical_title, filter_pit_items
+from .features.lhb import build_lhb_summary
 from .features.market import market_context
 from .models import build_scenarios, classify_market_state, rank_sectors, rank_stocks
 from .models.operator import infer_operator_playbook
@@ -140,10 +141,20 @@ class NightlyPipeline:
         n_index = 0
         for rows in index_payload:
             n_index += self.storage.upsert_index_daily(rows)
+        lhb_result = {"ok": False, "daily": 0, "inst": 0, "error": ""}
+        try:
+            lhb_daily = self.provider.top_list_by_date(trade_date)
+            lhb_inst = self.provider.top_inst_by_date(trade_date)
+            lhb_result["daily"] = self.storage.upsert_lhb_daily(lhb_daily, version)
+            lhb_result["inst"] = self.storage.upsert_lhb_inst(lhb_inst, version)
+            lhb_result["ok"] = bool(lhb_daily)
+        except Exception as exc:  # noqa: BLE001
+            lhb_result["error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
         return {
             "daily": n_daily,
             "basic": n_basic,
             "index": n_index,
+            "lhb": lhb_result,
             "trade_date": trade_date,
             "dataset_version": version,
         }
@@ -461,6 +472,7 @@ class NightlyPipeline:
             candidates = []
             for scenario in scenarios:
                 scenario["abstain"] = True
+        evidence["lhb"] = build_lhb_summary(self.storage, latest_str, industry_map)
         evidence["operator_hypotheses"] = infer_operator_playbook(context, evidence, sectors)
         payload = {
             "trade_date": latest_str,
@@ -635,6 +647,17 @@ class NightlyPipeline:
         hypothesis_text = "、".join(
             item.get("name", "") for item in (evidence.get("operator_hypotheses") or [])[:2]
         ) or "证据不足"
+        lhb = evidence.get("lhb") or {}
+        lhb_text = ""
+        if lhb.get("available"):
+            inflow = "、".join(
+                str(item.get("industry", "")) for item in (lhb.get("top_inflows") or [])[:2]
+            ) or "无"
+            inst = lhb.get("inst_net_buy_total_yi", 0.0) or 0.0
+            lhb_text = (
+                f"\n> 龙虎榜净买入：{inflow} · 机构净买入 "
+                f"{float(inst):+.1f} 亿"
+            )
         if candidates:
             primary = [c for c in candidates if c.get("tier") == "primary"][:3]
             pick_text = "、".join(
@@ -648,6 +671,7 @@ class NightlyPipeline:
             f"> 次日情景：{scenario_text}\n"
             f"> 强势板块：{sector_text}\n"
             f"> 行为假设：{hypothesis_text}（证据置信度 {float(evidence.get('confidence', 0)) * 100:.0f}%）\n"
+            f"{lhb_text}\n"
             f"> 主推荐：{pick_text}\n"
             f"> 系统状态：{payload.get('system_status')}\n"
             f"> 决策时点 {payload.get('decision_time')} · 信息截止 {payload.get('information_cutoff')}\n"

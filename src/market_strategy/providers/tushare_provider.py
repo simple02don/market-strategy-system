@@ -137,6 +137,28 @@ class TushareProvider:
             "ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount",
         )
 
+    # ---- 龙虎榜（资金面证据）----
+    def top_list_by_date(self, trade_date: str) -> list[dict]:
+        return self._date_rows(
+            "top_list",
+            trade_date,
+            (
+                "trade_date,ts_code,name,close,pct_change,turnover_rate,"
+                "amount,l_sell,l_buy,l_amount,net_amount,net_rate,"
+                "amount_rate,float_values,reason"
+            ),
+        )
+
+    def top_inst_by_date(self, trade_date: str) -> list[dict]:
+        return self._date_rows(
+            "top_inst",
+            trade_date,
+            (
+                "trade_date,ts_code,exalter,buy,buy_rate,sell,sell_rate,"
+                "net_buy,side,reason"
+            ),
+        )
+
     # ---- 新闻（财联社，含正文摘要）----
     def major_news(self, start_dt: str, end_dt: str, src: str = "财联社") -> list[dict]:
         return self.call(

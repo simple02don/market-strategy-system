@@ -88,6 +88,32 @@ CREATE TABLE IF NOT EXISTS index_daily (
   PRIMARY KEY (ts_code, trade_date)
 );
 
+CREATE TABLE IF NOT EXISTS lhb_daily (
+  trade_date TEXT NOT NULL,
+  ts_code TEXT NOT NULL,
+  name TEXT,
+  close REAL, pct_change REAL, turnover_rate REAL,
+  amount REAL, l_sell REAL, l_buy REAL, l_amount REAL,
+  net_amount REAL, net_rate REAL, amount_rate REAL,
+  float_values REAL, reason TEXT,
+  ingest_time TEXT NOT NULL,
+  dataset_version TEXT NOT NULL,
+  PRIMARY KEY (trade_date, ts_code)
+);
+CREATE INDEX IF NOT EXISTS idx_lhb_date ON lhb_daily(trade_date);
+
+CREATE TABLE IF NOT EXISTS lhb_inst (
+  trade_date TEXT NOT NULL,
+  ts_code TEXT NOT NULL,
+  exalter TEXT NOT NULL,
+  buy REAL, buy_rate REAL, sell REAL, sell_rate REAL,
+  net_buy REAL, side TEXT, reason TEXT,
+  ingest_time TEXT NOT NULL,
+  dataset_version TEXT NOT NULL,
+  PRIMARY KEY (trade_date, ts_code, exalter)
+);
+CREATE INDEX IF NOT EXISTS idx_lhb_inst_date ON lhb_inst(trade_date);
+
 CREATE TABLE IF NOT EXISTS news_item (
   source TEXT NOT NULL,
   source_id TEXT NOT NULL,
@@ -427,6 +453,85 @@ class Storage:
             )
         self._conn.commit()
         return len(rows)
+
+    # ---- 龙虎榜 ----
+    def upsert_lhb_daily(self, rows: list[dict], dataset_version: str) -> int:
+        if not rows:
+            return 0
+        now = _now()
+        for row in rows:
+            self._conn.execute(
+                """
+                INSERT INTO lhb_daily(
+                  trade_date, ts_code, name, close, pct_change, turnover_rate,
+                  amount, l_sell, l_buy, l_amount, net_amount, net_rate,
+                  amount_rate, float_values, reason, ingest_time, dataset_version)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(trade_date, ts_code) DO UPDATE SET
+                  name=excluded.name, close=excluded.close,
+                  pct_change=excluded.pct_change, turnover_rate=excluded.turnover_rate,
+                  amount=excluded.amount, l_sell=excluded.l_sell,
+                  l_buy=excluded.l_buy, l_amount=excluded.l_amount,
+                  net_amount=excluded.net_amount, net_rate=excluded.net_rate,
+                  amount_rate=excluded.amount_rate,
+                  float_values=excluded.float_values, reason=excluded.reason,
+                  ingest_time=excluded.ingest_time,
+                  dataset_version=excluded.dataset_version
+                """,
+                (
+                    row["trade_date"], row["ts_code"], row.get("name"),
+                    row.get("close"), row.get("pct_change"),
+                    row.get("turnover_rate"), row.get("amount"),
+                    row.get("l_sell"), row.get("l_buy"), row.get("l_amount"),
+                    row.get("net_amount"), row.get("net_rate"),
+                    row.get("amount_rate"), row.get("float_values"),
+                    row.get("reason"), now, dataset_version,
+                ),
+            )
+        self._conn.commit()
+        return len(rows)
+
+    def upsert_lhb_inst(self, rows: list[dict], dataset_version: str) -> int:
+        if not rows:
+            return 0
+        now = _now()
+        for row in rows:
+            self._conn.execute(
+                """
+                INSERT INTO lhb_inst(
+                  trade_date, ts_code, exalter, buy, buy_rate, sell, sell_rate,
+                  net_buy, side, reason, ingest_time, dataset_version)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(trade_date, ts_code, exalter) DO UPDATE SET
+                  buy=excluded.buy, buy_rate=excluded.buy_rate,
+                  sell=excluded.sell, sell_rate=excluded.sell_rate,
+                  net_buy=excluded.net_buy, side=excluded.side,
+                  reason=excluded.reason, ingest_time=excluded.ingest_time,
+                  dataset_version=excluded.dataset_version
+                """,
+                (
+                    row["trade_date"], row["ts_code"], row.get("exalter"),
+                    row.get("buy"), row.get("buy_rate"), row.get("sell"),
+                    row.get("sell_rate"), row.get("net_buy"), row.get("side"),
+                    row.get("reason"), now, dataset_version,
+                ),
+            )
+        self._conn.commit()
+        return len(rows)
+
+    def lhb_by_date(self, trade_date: str) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM lhb_daily WHERE trade_date=?",
+            (trade_date,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def lhb_inst_by_date(self, trade_date: str) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM lhb_inst WHERE trade_date=?",
+            (trade_date,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     # ---- 新闻与事实 ----
     def upsert_news(self, rows: list[dict]) -> int:

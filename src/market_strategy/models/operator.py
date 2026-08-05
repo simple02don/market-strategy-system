@@ -20,20 +20,50 @@ def infer_operator_playbook(
     sector_evidence = evidence.get("sector_scores") or {}
     top_sector = sectors[0] if sectors else {}
     second_sector = sectors[1] if len(sectors) > 1 else {}
+    lhb = evidence.get("lhb") or {}
+    lhb_inflow_industries = {
+        str(item.get("industry", "")) for item in lhb.get("top_inflows", [])
+    }
+    lhb_outflow_industries = {
+        str(item.get("industry", "")) for item in lhb.get("top_outflows", [])
+    }
+    inst_net_yi = float(lhb.get("inst_net_buy_total_yi", 0.0) or 0.0)
+    top_sector_industry = str(top_sector.get("industry", "")) if top_sector else ""
+    lhb_support_text = (
+        f"龙虎榜净买入靠前：{'、'.join(str(i.get('industry', '')) for i in lhb.get('top_inflows', [])[:2])}"
+        if lhb.get("top_inflows")
+        else ""
+    )
+    lhb_risk_text = (
+        f"龙虎榜净卖出靠前：{'、'.join(str(i.get('industry', '')) for i in lhb.get('top_outflows', [])[:2])}"
+        if lhb.get("top_outflows")
+        else ""
+    )
     concentration = max(
         [abs(float(value or 0.0)) for value in sector_evidence.values()] or [0.0]
     )
 
     hypotheses: list[dict[str, Any]] = []
 
-    def add(name: str, score: float, support: list[str], counter: list[str], next_day: str) -> None:
+    def add(
+        name: str,
+        score: float,
+        support: list[str],
+        counter: list[str],
+        next_day: str,
+        why_not: str,
+    ) -> None:
         hypotheses.append(
             {
                 "name": name,
                 "score": round(max(0.0, min(1.0, score)), 4),
                 "support": [item for item in support if item][:5],
                 "counterevidence": [item for item in counter if item][:4],
+                "strongest_counter": next(
+                    (item for item in counter if item), "无明显反证"
+                ),
                 "next_day_plan": next_day,
+                "why_not_adopted": why_not,
             }
         )
 
@@ -46,20 +76,27 @@ def infer_operator_playbook(
         [
             f"5日指数收益{index_ret:.2%}、上涨家数占比{advance:.1%}" if index_ret >= 0 and advance < 0.48 else "",
             f"政策强度{policy:.2f}" if policy > 0.15 else "",
+            lhb_risk_text,
         ],
         [f"上涨家数占比{advance:.1%}，并非明显权重独强" if advance >= 0.55 else ""],
         "若权重继续强于多数个股，偏向维持指数稳定；若宽度同步扩张，则该假设降级。",
+        "若宽度同步扩张，更可能是普涨而非刻意护盘；需要权重与个股背离持续确认。",
     )
 
     lead_score = 0.10 + 0.45 * concentration * confidence
     if top_sector and float(top_sector.get("score", 0.0) or 0.0) >= 70:
         lead_score += 0.25
+    if top_sector_industry in lhb_inflow_industries:
+        lead_score += 0.20
+    if inst_net_yi > 0:
+        lead_score += 0.10
     add(
         "拉主线",
         lead_score,
         [
             f"资讯最集中方向：{max(sector_evidence, key=lambda key: abs(sector_evidence[key]))}" if sector_evidence else "",
             f"板块首位{top_sector.get('industry')}，评分{top_sector.get('score')}" if top_sector else "",
+            lhb_support_text,
         ],
         [
             f"第二方向{second_sector.get('industry')}评分接近，可能是轮动而非单主线"
@@ -67,6 +104,7 @@ def infer_operator_playbook(
             else ""
         ],
         "观察首位板块能否在开盘后保持成交与扩散；只涨少数权重时按诱多/护盘处理。",
+        "若次日板块扩散而非单主线加速，则按轮动处理；龙虎榜净买入需在次日得到价格确认。",
     )
 
     rotation_score = 0.10 + 0.40 * policy * confidence
@@ -81,11 +119,16 @@ def infer_operator_playbook(
         ],
         ["资讯影响过度集中，更像单一主线" if concentration > 0.75 else ""],
         "优先观察有明确政策证据但尚未过热的方向，避免把长期规划直接解释成次日利好。",
+        "若资讯与资金都高度集中于单一方向，按主线处理而非轮动。",
     )
 
     release_score = 0.10 + 0.45 * risk * confidence + 0.25 * max(0.0, -sentiment)
     if advance < 0.35:
         release_score += 0.25
+    if top_sector_industry in lhb_outflow_industries:
+        release_score += 0.20
+    if inst_net_yi < 0:
+        release_score += 0.10
     add(
         "兑现降风险",
         release_score,
@@ -93,9 +136,11 @@ def infer_operator_playbook(
             f"风险资讯强度{risk:.2f}" if risk > 0.1 else "",
             f"资讯情绪{sentiment:.2f}" if sentiment < 0 else "",
             f"上涨宽度仅{advance:.1%}" if advance < 0.35 else "",
+            lhb_risk_text,
         ],
         [f"资讯情绪仍为正{sentiment:.2f}" if sentiment > 0.2 else ""],
         "若高位方向放量但宽度继续收缩，按兑现处理；若负面没有价格确认则不追空。",
+        "若次日低开高走或资金回流，则兑现假设不成立；需要放量滞涨或跌破关键位确认。",
     )
 
     hypotheses.sort(key=lambda item: item["score"], reverse=True)

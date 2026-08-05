@@ -2,8 +2,11 @@ import json
 import re
 
 from market_strategy.features.evidence import build_evidence_bundle, filter_pit_items
+from market_strategy.features.lhb import build_lhb_summary
 from market_strategy.models.inference import infer_market
+from market_strategy.models.operator import infer_operator_playbook
 from market_strategy.nlp import impact
+from market_strategy.storage import Storage
 
 
 def _item(source, source_id, title, publish_time, summary="", tier=2):
@@ -182,6 +185,90 @@ def test_impact_coverage_capped_to_window_and_ignores_extra_cached_ids():
         impact_result=impact,
     )
     assert bundle["impact_coverage"] == 0.5
+
+
+def test_lhb_summary_groups_by_industry(tmp_path):
+    storage = Storage(tmp_path / "lhb.db")
+    storage.upsert_lhb_daily(
+        [
+            {"trade_date": "20260805", "ts_code": "600489.SH", "name": "中金黄金",
+             "net_amount": 2e8},
+            {"trade_date": "20260805", "ts_code": "600547.SH", "name": "山东黄金",
+             "net_amount": 1e8},
+            {"trade_date": "20260805", "ts_code": "600004.SH", "name": "海运股份",
+             "net_amount": -0.5e8},
+        ],
+        "test",
+    )
+    storage.upsert_lhb_inst(
+        [
+            {"trade_date": "20260805", "ts_code": "600489.SH", "exalter": "机构专用",
+             "buy": 3e8, "sell": 2e8, "net_buy": 1e8, "side": "买"},
+            {"trade_date": "20260805", "ts_code": "600004.SH", "exalter": "机构专用",
+             "buy": 0.3e8, "sell": 0.5e8, "net_buy": -0.2e8, "side": "卖"},
+        ],
+        "test",
+    )
+    summary = build_lhb_summary(
+        storage,
+        "20260805",
+        {"600489.SH": "黄金", "600547.SH": "黄金", "600004.SH": "水运"},
+    )
+    assert summary["available"] is True
+    assert summary["stocks"] == 3
+    assert summary["top_inflows"][0]["industry"] == "黄金"
+    assert summary["top_inflows"][0]["net_amount_yi"] == 3.0
+    assert summary["top_outflows"][0]["industry"] == "水运"
+    assert round(summary["inst_net_buy_total_yi"], 2) == 0.8
+    storage.close()
+
+
+def test_operator_hypotheses_use_lhb_evidence():
+    context = {"breadth": {"advance_ratio": 0.6}, "ret_5d": 0.02}
+    evidence = {
+        "market_sentiment": 0.2,
+        "confidence": 0.8,
+        "policy_intensity": 0.1,
+        "risk_score": 0.05,
+        "sector_scores": {"黄金": 0.5},
+        "lhb": {
+            "available": True,
+            "top_inflows": [{"industry": "黄金", "net_amount_yi": 3.0}],
+            "top_outflows": [],
+            "inst_net_buy_total_yi": 1.0,
+        },
+    }
+    sectors = [
+        {"industry": "黄金", "score": 80.0},
+        {"industry": "水运", "score": 76.0},
+    ]
+    hypotheses = infer_operator_playbook(context, evidence, sectors)
+    by_name = {h["name"]: h for h in hypotheses}
+    assert "拉主线" in by_name
+    assert "龙虎榜" in " ".join(by_name["拉主线"]["support"])
+    assert "why_not_adopted" in by_name["拉主线"]
+    assert "strongest_counter" in by_name["拉主线"]
+
+
+def test_operator_lhb_outflow_boosts_release():
+    context = {"breadth": {"advance_ratio": 0.5}, "ret_5d": 0.0}
+    evidence = {
+        "market_sentiment": -0.1,
+        "confidence": 0.8,
+        "policy_intensity": 0.0,
+        "risk_score": 0.1,
+        "sector_scores": {},
+        "lhb": {
+            "available": True,
+            "top_inflows": [],
+            "top_outflows": [{"industry": "黄金", "net_amount_yi": -2.0}],
+            "inst_net_buy_total_yi": -2.0,
+        },
+    }
+    sectors = [{"industry": "黄金", "score": 80.0}]
+    hypotheses = infer_operator_playbook(context, evidence, sectors)
+    by_name = {h["name"]: h for h in hypotheses}
+    assert by_name["兑现降风险"]["score"] > 0.3
 
 
 class _Predictor:

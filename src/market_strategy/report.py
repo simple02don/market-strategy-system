@@ -28,6 +28,7 @@ def generate_report(payload: dict[str, Any], output: Path) -> Path:
     candidates = payload.get("candidates") or []
     facts = payload.get("facts") or {}
     evidence = payload.get("evidence") or {}
+    lhb = evidence.get("lhb") or {}
     breadth = ((payload.get("market_context") or {}).get("breadth") or {})
     data_status = payload.get("data_status") or {}
     stale_days = int(payload.get("stale_days") or 0)
@@ -66,6 +67,8 @@ def generate_report(payload: dict[str, Any], output: Path) -> Path:
         f"<li><b>{_esc(item.get('name'))}</b>（证据分 {_esc(item.get('score'))}）<br>"
         f"支持：{_esc('；'.join(item.get('support') or []) or '无')}<br>"
         f"反证：{_esc('；'.join(item.get('counterevidence') or []) or '无')}<br>"
+        f"最强反证：{_esc(item.get('strongest_counter') or '无明显反证')}<br>"
+        f"为何未采纳为唯一结论：{_esc(item.get('why_not_adopted') or '—')}<br>"
         f"次日验证：{_esc(item.get('next_day_plan'))}</li>"
         for item in (evidence.get("operator_hypotheses") or [])[:5]
     ) or "<li>证据不足，暂不形成操盘行为假设</li>"
@@ -75,6 +78,36 @@ def generate_report(payload: dict[str, Any], output: Path) -> Path:
         f"<td>{_esc(item.get('rationale'))}</td></tr>"
         for item in (evidence.get("top_evidence") or [])[:8]
     ) or "<tr><td colspan='5'>没有通过信息截止时间与跨源去重校验的证据</td></tr>"
+
+    if lhb.get("available"):
+        lhb_rows = (
+            f"<p>上榜 {_esc(lhb.get('stocks'))} 只 · 龙虎榜净买入总额 "
+            f"{_esc(lhb.get('total_net_amount_yi'))} 亿 · 机构席位净买入 "
+            f"{_esc(lhb.get('inst_net_buy_total_yi'))} 亿</p>"
+        )
+        lhb_inflow = "、".join(
+            f"{_esc(item.get('industry'))}（{_esc(item.get('net_amount_yi'))}亿）"
+            for item in (lhb.get("top_inflows") or [])[:3]
+        ) or "无"
+        lhb_outflow = "、".join(
+            f"{_esc(item.get('industry'))}（{_esc(item.get('net_amount_yi'))}亿）"
+            for item in (lhb.get("top_outflows") or [])[:3]
+        ) or "无"
+        lhb_inst = "、".join(
+            f"{_esc(item.get('industry'))}（{_esc(item.get('inst_net_buy_yi'))}亿）"
+            for item in (lhb.get("inst_top_inflows") or [])[:3]
+        ) or "无"
+        lhb_card = (
+            f"<div class='card'><h2>龙虎榜资金面</h2>{lhb_rows}"
+            f"<p>净买入行业：{lhb_inflow}</p>"
+            f"<p>净卖出行业：{lhb_outflow}</p>"
+            f"<p>机构席位净买入靠前：{lhb_inst}</p></div>"
+        )
+    else:
+        lhb_card = (
+            "<div class='card'><h2>龙虎榜资金面</h2>"
+            "<p>暂无当日龙虎榜数据（数据源缺失时不影响主流程）</p></div>"
+        )
 
     stale_warning = (
         f"<p class='warn'>最近行情日为 {_esc(data_status.get('latest_trade_date'))} "
@@ -121,6 +154,7 @@ th{{color:#8fa0bd;font-weight:500}}
 	影响评估 {_esc(evidence.get('impact_status'))}（覆盖 {_pct(evidence.get('impact_coverage'))}）</p>
 	<h3>操盘行为假设</h3><ul>{hypotheses}</ul>
 	<table><tr><th>时间</th><th>来源</th><th>证据</th><th>影响</th><th>依据</th></tr>{evidence_rows}</table></div>
+	{lhb_card}
 <div class="card"><h2>板块职责与相对强弱 Top8</h2>
 <table><tr><th>行业</th><th>职责</th><th>评分</th><th>当日</th><th>20日超额</th></tr>{sector_rows}</table></div>
 <div class="card"><h2>个股推荐</h2>

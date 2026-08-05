@@ -58,3 +58,26 @@ def test_prediction_json_is_finite_and_only_formal_predictions_track(tmp_path):
     assert len(pending) == 1
     assert pending[0]["id"] == 2
     storage.close()
+
+
+def test_lhb_upsert_and_read(tmp_path):
+    storage = Storage(tmp_path / "test.db")
+    daily = [
+        {"trade_date": "20260805", "ts_code": "600489.SH", "name": "中金黄金",
+         "net_amount": 2e8, "reason": "日涨幅偏离值达7%"},
+        {"trade_date": "20260805", "ts_code": "600004.SH", "name": "海运股份",
+         "net_amount": -0.5e8, "reason": "日换手率达20%"},
+    ]
+    inst = [
+        {"trade_date": "20260805", "ts_code": "600489.SH", "exalter": "机构专用",
+         "buy": 3e8, "sell": 2e8, "net_buy": 1e8, "side": "买"},
+    ]
+    assert storage.upsert_lhb_daily(daily, "live-test") == 2
+    assert storage.upsert_lhb_inst(inst, "live-test") == 1
+    rows = storage.lhb_by_date("20260805")
+    assert len(rows) == 2
+    assert {row["ts_code"] for row in rows} == {"600489.SH", "600004.SH"}
+    assert rows[0]["dataset_version"] == "live-test"
+    inst_rows = storage.lhb_inst_by_date("20260805")
+    assert inst_rows[0]["net_buy"] == 1e8
+    storage.close()
