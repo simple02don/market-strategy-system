@@ -5,6 +5,7 @@ import pandas as pd
 
 import market_strategy.pipeline as pipeline_module
 from market_strategy.backtest import _portfolio, _split
+from market_strategy.cli import _fallback_data_day
 from market_strategy.features.market import market_context
 from market_strategy.models.train import _four_way_date_split
 from market_strategy.pipeline import NightlyPipeline
@@ -154,6 +155,13 @@ def test_portfolio_cost_is_in_basis_points_and_uses_turnover():
     assert result["daily_sample"][0]["cost"] == 0.2
     assert result["daily_sample"][1]["turnover"] == 2.0
     assert result["daily_sample"][1]["cost"] == 0.4
+
+
+def test_data_lag_fallback_keeps_latest_target_and_returns_db_max():
+    latest = date(2026, 8, 5)
+    assert _fallback_data_day(latest, "20260804") == "20260804"
+    assert _fallback_data_day(latest, "20260805") is None
+    assert _fallback_data_day(latest, None) is None
 
 
 def test_pipeline_uses_evidence_before_decision_and_can_be_normal(tmp_path, monkeypatch):

@@ -177,6 +177,7 @@ class NightlyPipeline:
         push: bool = True,
         dry_run: bool = False,
         force: bool = False,
+        fallback_td: str | None = None,
     ) -> dict[str, Any]:
         next_day_str = next_day.strftime("%Y%m%d")
         latest_str = latest_td.strftime("%Y%m%d")
@@ -205,7 +206,15 @@ class NightlyPipeline:
         model_version = "rule_v1"
         try:
             self.update_stock_pool()
-            update_result = self.update_market_data(latest_str)
+            try:
+                update_result = self.update_market_data(latest_str)
+            except RuntimeError as exc:
+                if fallback_td and fallback_td != latest_str:
+                    # 最新交易日数据尚未发布/不完整：降级到库内最新交易日，显式标记。
+                    update_result = self.update_market_data(fallback_td)
+                    update_result["data_fallback"] = str(exc)
+                else:
+                    raise
             dataset_version = str(update_result.get("dataset_version") or "")
             information_cutoff = now_str()
             result = self._compose(
