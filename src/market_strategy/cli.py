@@ -268,6 +268,7 @@ def main(argv: list[str] | None = None) -> int:
         "data-update": cmd_data_update,
         "nightly": cmd_nightly,
         "train": cmd_train,
+        "train-log": cmd_train_log,
         "health": cmd_health,
         "track-outcomes": cmd_track_outcomes,
         "backtest": cmd_backtest,
