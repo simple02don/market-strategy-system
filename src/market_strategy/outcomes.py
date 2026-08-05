@@ -7,6 +7,7 @@ import json
 import pandas as pd
 
 from . import config
+from .execution.replay import run_replay
 from .storage import Storage
 
 
@@ -15,6 +16,7 @@ def track_outcomes(storage: Storage, max_data_date: str) -> dict:
     if not pending:
         return {"tracked": 0, "pending": 0, "summary": storage.outcome_summary()}
     tracked = 0
+    replay_counts: dict = {"replayed": 0, "filled": 0, "not_filled": 0, "canceled": 0, "no_data": 0}
     industry_of = _industry_of(storage)
     dates = sorted({record["trade_date"] for record in pending})
     for trade_date in dates:
@@ -70,10 +72,14 @@ def track_outcomes(storage: Storage, max_data_date: str) -> dict:
                 }
             )
             tracked += 1
+            replay = run_replay(storage, [record])
+            for key in replay_counts:
+                replay_counts[key] += replay.get(key, 0)
     return {
         "tracked": tracked,
         "pending": len(pending) - tracked,
         "summary": storage.outcome_summary(),
+        "replay": replay_counts,
     }
 
 

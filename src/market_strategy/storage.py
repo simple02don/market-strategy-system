@@ -114,6 +114,18 @@ CREATE TABLE IF NOT EXISTS lhb_inst (
 );
 CREATE INDEX IF NOT EXISTS idx_lhb_inst_date ON lhb_inst(trade_date);
 
+CREATE TABLE IF NOT EXISTS minute_bar (
+  ts_code TEXT NOT NULL,
+  trade_date TEXT NOT NULL,
+  trade_time TEXT NOT NULL,
+  open REAL, high REAL, low REAL, close REAL,
+  vol REAL, amount REAL,
+  source TEXT,
+  ingest_time TEXT NOT NULL,
+  PRIMARY KEY (ts_code, trade_time)
+);
+CREATE INDEX IF NOT EXISTS idx_minute_date ON minute_bar(trade_date);
+
 CREATE TABLE IF NOT EXISTS news_item (
   source TEXT NOT NULL,
   source_id TEXT NOT NULL,
@@ -208,6 +220,21 @@ CREATE TABLE IF NOT EXISTS candidate_outcome (
   excess REAL,
   measurement TEXT,
   recorded_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS execution_replay (
+  prediction_id INTEGER PRIMARY KEY,
+  trade_date TEXT NOT NULL,
+  ts_code TEXT NOT NULL,
+  verdict TEXT NOT NULL,
+  high_open_pct REAL,
+  vwap_15m REAL,
+  close_15m REAL,
+  entry_price REAL,
+  exit_price REAL,
+  reason TEXT,
+  source TEXT,
+  created_at TEXT NOT NULL
 );
 """
 
@@ -533,6 +560,46 @@ class Storage:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    # ---- 分钟线 ----
+    def upsert_minute_bars(self, rows: list[dict]) -> int:
+        if not rows:
+            return 0
+        now = _now()
+        for row in rows:
+            self._conn.execute(
+                """
+                INSERT INTO minute_bar(
+                  ts_code, trade_date, trade_time, open, high, low, close,
+                  vol, amount, source, ingest_time)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(ts_code, trade_time) DO UPDATE SET
+                  open=excluded.open, high=excluded.high, low=excluded.low,
+                  close=excluded.close, vol=excluded.vol, amount=excluded.amount,
+                  source=excluded.source, ingest_time=excluded.ingest_time
+                """,
+                (
+                    row["ts_code"], row.get("trade_date", ""),
+                    row["trade_time"], row.get("open"), row.get("high"),
+                    row.get("low"), row.get("close"), row.get("vol"),
+                    row.get("amount"), row.get("source", ""), now,
+                ),
+            )
+        self._conn.commit()
+        return len(rows)
+
+    def minute_bars(self, ts_code: str, trade_date: str) -> list[dict]:
+        rows = self._conn.execute(
+            """
+            SELECT ts_code, trade_date, trade_time, open, high, low, close,
+                   vol, amount, source
+            FROM minute_bar
+            WHERE ts_code=? AND trade_date=?
+            ORDER BY trade_time
+            """,
+            (ts_code, trade_date),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     # ---- 新闻与事实 ----
     def upsert_news(self, rows: list[dict]) -> int:
         if not rows:
@@ -841,6 +908,32 @@ class Storage:
                 row.get("tier"), row.get("score"), row.get("ret_next"),
                 row.get("industry_ret_next"), row.get("market_ret_next"),
                 row.get("excess"), row.get("measurement", ""), _now(),
+            ),
+        )
+        self._conn.commit()
+
+    def save_execution_replay(self, row: dict) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO execution_replay(
+              prediction_id, trade_date, ts_code, verdict, high_open_pct,
+              vwap_15m, close_15m, entry_price, exit_price, reason, source,
+              created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(prediction_id) DO UPDATE SET
+              verdict=excluded.verdict, high_open_pct=excluded.high_open_pct,
+              vwap_15m=excluded.vwap_15m, close_15m=excluded.close_15m,
+              entry_price=excluded.entry_price, exit_price=excluded.exit_price,
+              reason=excluded.reason, source=excluded.source,
+              created_at=excluded.created_at
+            """,
+            (
+                row["prediction_id"], row.get("trade_date", ""),
+                row.get("ts_code", ""), row.get("verdict", ""),
+                row.get("high_open_pct"), row.get("vwap_15m"),
+                row.get("close_15m"), row.get("entry_price"),
+                row.get("exit_price"), row.get("reason", ""),
+                row.get("source", ""), _now(),
             ),
         )
         self._conn.commit()

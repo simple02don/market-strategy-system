@@ -159,6 +159,39 @@ class TushareProvider:
             ),
         )
 
+    # ---- 分钟线 ----
+    def stk_mins(
+        self,
+        ts_code: str,
+        trade_date: str,
+        freq: str = "1min",
+    ) -> list[dict]:
+        """单只股票分钟线（1/5/15/30/60min）。"""
+        rows = self.call(
+            "stk_mins",
+            {
+                "ts_code": ts_code,
+                "freq": freq,
+                "start_date": f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]} 09:00:00",
+                "end_date": f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]} 15:30:00",
+            },
+            "ts_code,trade_time,open,high,low,close,vol,amount",
+        )
+        return [
+            {
+                "ts_code": str(row["ts_code"]),
+                "trade_time": str(row["trade_time"]),
+                "open": float(row.get("open") or 0.0),
+                "high": float(row.get("high") or 0.0),
+                "low": float(row.get("low") or 0.0),
+                "close": float(row.get("close") or 0.0),
+                "vol": float(row.get("vol") or 0.0),
+                "amount": float(row.get("amount") or 0.0),
+            }
+            for row in rows
+            if row.get("trade_time", "").startswith(trade_date[:4] + "-" + trade_date[4:6] + "-" + trade_date[6:])
+        ]
+
     # ---- 新闻（财联社，含正文摘要）----
     def major_news(self, start_dt: str, end_dt: str, src: str = "财联社") -> list[dict]:
         return self.call(
