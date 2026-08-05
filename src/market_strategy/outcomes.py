@@ -14,7 +14,12 @@ from .storage import Storage
 def track_outcomes(storage: Storage, max_data_date: str) -> dict:
     pending = storage.pending_outcomes(max_data_date)
     if not pending:
-        return {"tracked": 0, "pending": 0, "summary": storage.outcome_summary()}
+        return {
+            "tracked": 0,
+            "pending": 0,
+            "summary": storage.outcome_summary(),
+            "replay": {"replayed": 0, "filled": 0, "not_filled": 0, "canceled": 0, "no_data": 0},
+        }
     tracked = 0
     replay_counts: dict = {"replayed": 0, "filled": 0, "not_filled": 0, "canceled": 0, "no_data": 0}
     industry_of = _industry_of(storage)
