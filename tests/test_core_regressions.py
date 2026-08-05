@@ -315,6 +315,19 @@ def test_eastmoney_kline_parser_respects_date_window():
     assert rows[0]["amount"] == 0.0
 
 
+def test_train_failure_records_experiment(tmp_path):
+    from market_strategy.models.train import train_all
+
+    storage = Storage(tmp_path / "train.db")
+    result = train_all(storage, "20260805")
+    assert result["status"] == "failed"
+    rows = storage.recent_train_experiments(5)
+    assert rows and rows[0]["status"] == "failed"
+    assert rows[0]["trained_through"] == "20260805"
+    assert rows[0]["config"] != "{}"
+    storage.close()
+
+
 def test_pipeline_uses_evidence_before_decision_and_can_be_normal(tmp_path, monkeypatch):
     storage = Storage(tmp_path / "market.db")
     dates = _seed_market(storage)

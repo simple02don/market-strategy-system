@@ -126,6 +126,13 @@ def cmd_train(args) -> int:
     return 0
 
 
+def cmd_train_log(args) -> int:
+    with Storage() as storage:
+        rows = storage.recent_train_experiments(args.limit)
+        print(json.dumps(rows, ensure_ascii=False, indent=2, default=str))
+    return 0
+
+
 def cmd_health(args) -> int:
     with Storage() as storage:
         latest = storage.latest_run("nightly")
@@ -243,6 +250,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--force", action="store_true", help="允许覆盖同一目标日的正式运行防重门槛")
     p = sub.add_parser("train", help="模型训练（低峰自动运行）")
     p.add_argument("--trade-date")
+    p = sub.add_parser("train-log", help="最近训练实验记录（配置/指标/晋级决策）")
+    p.add_argument("--limit", type=int, default=10)
     sub.add_parser("health", help="健康检查")
     p = sub.add_parser("track-outcomes", help="候选次日结果跟踪")
     p.add_argument("--trade-date")

@@ -236,6 +236,27 @@ CREATE TABLE IF NOT EXISTS execution_replay (
   source TEXT,
   created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS train_experiment (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  trained_at TEXT NOT NULL,
+  trained_through TEXT NOT NULL,
+  code_commit TEXT,
+  model_version TEXT,
+  artifact_version INTEGER,
+  status TEXT NOT NULL,
+  error TEXT,
+  split_spec TEXT NOT NULL,
+  data_window TEXT NOT NULL,
+  config TEXT NOT NULL,
+  challenger_metrics TEXT,
+  selected_metrics TEXT,
+  component_status TEXT,
+  promoted_components TEXT,
+  started_at TEXT NOT NULL,
+  finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_train_experiment_time ON train_experiment(trained_at);
 """
 
 
@@ -937,6 +958,50 @@ class Storage:
             ),
         )
         self._conn.commit()
+
+    # ---- 训练实验记录 ----
+    def save_train_experiment(self, row: dict) -> int:
+        import json
+
+        self._conn.execute(
+            """
+            INSERT INTO train_experiment(
+              trained_at, trained_through, code_commit, model_version,
+              artifact_version, status, error, split_spec, data_window, config,
+              challenger_metrics, selected_metrics, component_status,
+              promoted_components, started_at, finished_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                row["trained_at"], row["trained_through"],
+                row.get("code_commit", ""), row.get("model_version", ""),
+                row.get("artifact_version"),
+                row["status"], row.get("error", ""),
+                json.dumps(_json_safe(row.get("split_spec", {})), ensure_ascii=False, allow_nan=False),
+                json.dumps(_json_safe(row.get("data_window", {})), ensure_ascii=False, allow_nan=False),
+                json.dumps(_json_safe(row.get("config", {})), ensure_ascii=False, allow_nan=False),
+                json.dumps(_json_safe(row.get("challenger_metrics", {})), ensure_ascii=False, allow_nan=False),
+                json.dumps(_json_safe(row.get("selected_metrics", {})), ensure_ascii=False, allow_nan=False),
+                json.dumps(_json_safe(row.get("component_status", {})), ensure_ascii=False, allow_nan=False),
+                json.dumps(row.get("promoted_components", []), ensure_ascii=False),
+                row["started_at"], row.get("finished_at", ""),
+            ),
+        )
+        self._conn.commit()
+        return int(self._conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+    def recent_train_experiments(self, limit: int = 10) -> list[dict]:
+        rows = self._conn.execute(
+            """
+            SELECT id, trained_at, trained_through, code_commit, model_version,
+                   artifact_version, status, error, split_spec, data_window,
+                   config, challenger_metrics, selected_metrics,
+                   component_status, promoted_components
+            FROM train_experiment ORDER BY id DESC LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def outcome_summary(self) -> dict:
         row = self._conn.execute(

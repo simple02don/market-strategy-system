@@ -122,13 +122,63 @@ def _costed_topk_mean(
     return float(np.mean(returns)) if returns else -999.0
 
 
-def train_all(storage: Storage, trade_date: str) -> dict:
-    started = now_str()
+def _git_commit() -> str:
+    import subprocess
+
+    try:
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(config.ROOT),
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+            .decode()
+            .strip()[:12]
+        )
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def _experiment_config() -> dict:
+    return {
+        "lgb_params": _lgb_params(),
+        "features": {
+            "market": MARKET_FEATURES,
+            "sector": SECTOR_FEATURES,
+            "stock": STOCK_FEATURES,
+        },
+        "split_ratios": [0.60, 0.70, 0.80],
+        "env": {"MODEL_MAJOR_VERSION": config.env_int("MODEL_MAJOR_VERSION", 1)},
+    }
+
+
+def _split_summary(*frames) -> dict:
+    labels = ("train", "early", "calibration", "validation")
+    return {
+        labels[index]: int(frames[index]["date"].nunique())
+        for index in range(len(frames))
+    }
+
+
+def _data_window(frame: pd.DataFrame) -> dict:
+    if frame.empty:
+        return {"rows": 0}
+    return {
+        "rows": int(len(frame)),
+        "start": str(frame["date"].min()),
+        "end": str(frame["date"].max()),
+    }
+
+
+def _train_all_impl(storage: Storage, trade_date: str, started: str) -> dict:
     market = build_market_features(storage, trade_date, days=500)
     sector = build_sector_features(storage, trade_date, days=500)
     stock = build_stock_features(storage, trade_date, days=500)
     if market.empty or sector.empty or stock.empty:
-        return {"status": "failed", "error": "features_empty", "sizes": [len(market), len(sector), len(stock)]}
+        raise RuntimeError(
+            f"features_empty: sizes={[len(market), len(sector), len(stock)]}"
+        )
 
     numeric = market.select_dtypes(include=[np.number]).columns
     market[numeric] = market[numeric].astype("float32")
@@ -140,7 +190,7 @@ def train_all(storage: Storage, trade_date: str) -> dict:
     market = market.dropna(subset=["idx_ret1_next"])
     mkt_train, mkt_early, mkt_cal, mkt_val = _four_way_date_split(market)
     if any(frame.empty for frame in (mkt_train, mkt_early, mkt_cal, mkt_val)):
-        return {"status": "failed", "error": "market_split_empty"}
+        raise RuntimeError("market_split_empty")
     mkt_feats_train = mkt_train[MARKET_FEATURES].fillna(0.0).values
     mkt_feats_early = mkt_early[MARKET_FEATURES].fillna(0.0).values
     mkt_feats_cal = mkt_cal[MARKET_FEATURES].fillna(0.0).values
@@ -376,4 +426,60 @@ def train_all(storage: Storage, trade_date: str) -> dict:
         "saved": saved,
         "replaced_previous": replace,
         "model_version": meta["model_version"],
+        "split_spec": {
+            "market": _split_summary(mkt_train, mkt_early, mkt_cal, mkt_val),
+            "sector": _split_summary(sec_train, sec_early, _sec_cal, sec_val),
+            "stock": _split_summary(stk_train, stk_early, stk_cal, stk_val),
+        },
+        "data_window": {
+            "market": _data_window(market),
+            "sector": _data_window(sector),
+            "stock": _data_window(stock),
+        },
+        "selected_metrics": selected_metrics,
     }
+
+
+def train_all(storage: Storage, trade_date: str) -> dict:
+    """训练入口：执行训练并把实验记录（配置/切分/指标/晋级决策）落库。"""
+    started = now_str()
+    try:
+        result = _train_all_impl(storage, trade_date, started)
+    except Exception as exc:  # noqa: BLE001
+        storage.save_train_experiment(
+            {
+                "trained_at": now_str(),
+                "trained_through": trade_date,
+                "code_commit": _git_commit(),
+                "model_version": f"lgbm_v{config.env_int('MODEL_MAJOR_VERSION', 1)}",
+                "artifact_version": None,
+                "status": "failed",
+                "error": f"{type(exc).__name__}: {str(exc)[:500]}",
+                "split_spec": {},
+                "data_window": {},
+                "config": _experiment_config(),
+                "started_at": started,
+                "finished_at": now_str(),
+            }
+        )
+        return {"status": "failed", "error": str(exc)}
+    storage.save_train_experiment(
+        {
+            "trained_at": now_str(),
+            "trained_through": trade_date,
+            "code_commit": _git_commit(),
+            "model_version": result.get("model_version", ""),
+            "artifact_version": (result.get("saved") or {}).get("version"),
+            "status": result.get("status", "unknown"),
+            "split_spec": result.get("split_spec", {}),
+            "data_window": result.get("data_window", {}),
+            "config": _experiment_config(),
+            "challenger_metrics": result.get("metrics", {}),
+            "selected_metrics": result.get("selected_metrics", {}),
+            "component_status": result.get("component_status", {}),
+            "promoted_components": result.get("promoted_components", []),
+            "started_at": started,
+            "finished_at": now_str(),
+        }
+    )
+    return result
