@@ -37,6 +37,19 @@ def classify_stock_route(frame: pd.DataFrame | None) -> tuple[str, dict[str, Any
     ma20_slope = float(ma20.iloc[-1] / ma20.iloc[-6] - 1.0) * 100.0 if len(frame) >= 21 else 0.0
     prev20_high = float(high.iloc[-21:-1].max())
     breakout20 = price > prev20_high
+    support1 = float(low.iloc[-21:-1].min()) if len(frame) >= 21 else float(low.min())
+    resistance1 = prev20_high
+    resistance2 = (
+        float(high.iloc[-61:-1].max())
+        if len(frame) >= 61
+        else resistance1
+    )
+    room_to_resistance_pct = (
+        (resistance2 / price - 1.0) * 100.0 if resistance2 > 0 else 0.0
+    )
+    dist_from_support_pct = (
+        (price / support1 - 1.0) * 100.0 if support1 > 0 else 0.0
+    )
     vol_ratio = float(vol.iloc[-1] / (vol.iloc[-21:-6].mean() + 1e-9))
     ret5 = float(pct.iloc[-5:].sum())
     ret15 = float(pct.iloc[-15:].sum())
@@ -105,6 +118,11 @@ def classify_stock_route(frame: pd.DataFrame | None) -> tuple[str, dict[str, Any
         "ma5_slope_pct": round(ma5_slope, 3),
         "ma20_slope_pct": round(ma20_slope, 3),
         "breakout20": bool(breakout20),
+        "support1": round(support1, 3),
+        "resistance1": round(resistance1, 3),
+        "resistance2": round(resistance2, 3),
+        "room_to_resistance_pct": round(room_to_resistance_pct, 2),
+        "dist_from_support_pct": round(dist_from_support_pct, 2),
         "vol_ratio": round(vol_ratio, 3),
         "ret5": round(ret5, 2),
         "ret15": round(ret15, 2),
@@ -124,6 +142,37 @@ ROUTE_BONUS = {
     "rising_trend": 5.0,
     "not_confirmed": 0.0,
 }
+
+
+def route_near_miss(
+    frame: pd.DataFrame | None,
+    detail: dict[str, Any],
+) -> tuple[bool, str]:
+    """近合格判定：形态差一步但结构健康（用于正常模式 0 主推兜底）。"""
+    if frame is None or len(frame) < 30:
+        return False, ""
+    if detail.get("exhaustion"):
+        return False, "短线过热"
+    close = frame["close"].astype(float)
+    ma10 = float(close.rolling(10).mean().iloc[-1])
+    ma20 = float(close.rolling(20).mean().iloc[-1])
+    price = float(close.iloc[-1])
+    above_ma20 = price > ma20
+    reasons: list[str] = []
+    if (
+        above_ma20
+        and price > ma10
+        and float(detail.get("ma20_slope_pct", 0.0) or 0.0) >= -5.0
+        and float(detail.get("ret5", 0.0) or 0.0) > 0
+    ):
+        reasons.append("上升趋势雏形（站上MA10/MA20）")
+    if detail.get("breakout20") and float(detail.get("vol_ratio", 0.0) or 0.0) >= 1.0:
+        reasons.append("突破20日高但量能略欠")
+    if int(detail.get("pullback_days", 0) or 0) == 6 and float(
+        detail.get("pullback_drop_pct", 0.0) or 0.0
+    ) <= 10:
+        reasons.append("回踩第6日（略超窗口）")
+    return bool(reasons), "；".join(reasons)
 
 
 def defensive_universe(
@@ -242,6 +291,7 @@ def defensive_selection(
         route, detail = classify_stock_route(frame)
         updated = {
             **cand,
+            "tier": "",
             "route": route,
             "pattern": detail,
             "score": round(float(cand.get("score", 0.0)) + ROUTE_BONUS[route], 2),
@@ -323,19 +373,23 @@ def apply_pattern_selection(
     for cand in candidates:
         frame = stock_history.get(cand.get("ts_code", ""))
         route, detail = classify_stock_route(frame)
+        near, near_reason = route_near_miss(frame, detail)
         updated = {
             **cand,
             "route": route,
             "pattern": detail,
+            "near_miss": near,
+            "near_miss_reason": near_reason,
             "score": round(float(cand.get("score", 0.0)) + ROUTE_BONUS[route], 2),
         }
         out.append(updated)
     out.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
 
-    primary_count = 0
-    watch_count = 0
-    industry_counts: dict[str, int] = {}
     target_set = set(target_sectors)
+    industry_counts: dict[str, int] = {}
+    primary_count = 0
+    primary_codes: set[str] = set()
+    # 第一轮：形态合格者优先
     for cand in out:
         industry = str(cand.get("industry") or "")
         in_target = (not target_set) or industry in target_set
@@ -347,11 +401,37 @@ def apply_pattern_selection(
             and industry_counts.get(industry, 0) < primary_max_same_industry
         ):
             cand["tier"] = "primary"
+            cand["pattern_grade"] = "qualified"
             primary_count += 1
+            primary_codes.add(cand["ts_code"])
             industry_counts[industry] = industry_counts.get(industry, 0) + 1
-        elif watch_count < watch_max and float(cand.get("score", 0.0)) >= min_watch_score:
+    # 第二轮：无合格主推时用 near-miss 补位（形态差一步但结构健康）
+    if primary_count == 0 and target_set:
+        for cand in out:
+            industry = str(cand.get("industry") or "")
+            in_target = (not target_set) or industry in target_set
+            if (
+                in_target
+                and cand["route"] == "not_confirmed"
+                and cand.get("near_miss")
+                and primary_count < primary_max
+                and float(cand.get("score", 0.0)) >= min_primary_score
+                and industry_counts.get(industry, 0) < primary_max_same_industry
+            ):
+                cand["tier"] = "primary"
+                cand["pattern_grade"] = "near_miss"
+                primary_count += 1
+                primary_codes.add(cand["ts_code"])
+                industry_counts[industry] = industry_counts.get(industry, 0) + 1
+    # 第三轮：观察与回避
+    watch_count = 0
+    for cand in out:
+        if cand["ts_code"] in primary_codes:
+            continue
+        if watch_count < watch_max and float(cand.get("score", 0.0)) >= min_watch_score:
             cand["tier"] = "watch"
             watch_count += 1
         else:
             cand["tier"] = "risk_control"
+            cand.setdefault("action", "回避")
     return out

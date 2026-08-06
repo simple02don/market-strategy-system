@@ -9,6 +9,7 @@ from market_strategy.models.stock_pattern import (
     classify_stock_route,
     defensive_selection,
     defensive_universe,
+    route_near_miss,
 )
 from market_strategy.models.intent import STAGE_PLAYBOOK
 
@@ -35,6 +36,16 @@ def _frame(closes, vols=None):
     return pd.DataFrame(rows)
 
 
+def _near_frame():
+    """上升后回调、MA20 微降、今日反弹站上 MA10：not_confirmed 但近合格。"""
+    closes = (
+        [10.0 + index * 0.05 for index in range(20)]
+        + [10.95 - index * 0.03 for index in range(25)]
+        + [10.25, 10.35, 10.5]
+    )
+    return _frame(closes)
+
+
 def test_route_just_started():
     closes = [10.0] * 30 + [10.2, 10.4, 10.6, 10.8, 11.0, 11.3]
     vols = [1000.0] * len(closes)
@@ -42,6 +53,10 @@ def test_route_just_started():
     route, detail = classify_stock_route(_frame(closes, vols))
     assert route == "just_started"
     assert detail["breakout20"] is True
+    assert detail["support1"] > 0
+    assert detail["resistance2"] >= detail["resistance1"]
+    assert "room_to_resistance_pct" in detail
+    assert "dist_from_support_pct" in detail
 
 
 def test_route_rising_trend():
@@ -194,6 +209,46 @@ def test_defensive_structure_candidates_skip_route_requirement():
     ]
     out = defensive_selection(candidates, {}, haven_sectors={"元器件"})
     assert out[0]["tier"] == "haven"
+
+
+def test_route_near_miss_flags_rising_seed_and_blocks_exhaustion():
+    near_frame = _near_frame()
+    near_route, near_detail = classify_stock_route(near_frame)
+    assert near_route == "not_confirmed"
+    assert route_near_miss(near_frame, near_detail) == (True, "上升趋势雏形（站上MA10/MA20）")
+
+    hot_closes = [10.0] * 30 + [10.0 + index * 0.8 for index in range(6)]
+    _hot_route, hot_detail = classify_stock_route(_frame(hot_closes))
+    assert route_near_miss(_frame(hot_closes), hot_detail) == (False, "短线过热")
+
+
+def test_apply_pattern_selection_near_miss_fills_zero_primary():
+    near_frame = _near_frame()
+    flat = _frame([10.0] * 60)
+    candidates = [
+        {"ts_code": "600001.SH", "name": "B", "industry": "黄金", "score": 79.0, "tier": "watch", "evidence_score": 0.0},
+        {"ts_code": "600002.SH", "name": "C", "industry": "黄金", "score": 78.0, "tier": "watch", "evidence_score": 0.0},
+    ]
+    history = {"600001.SH": near_frame, "600002.SH": flat}
+    out = apply_pattern_selection(candidates, history, ["黄金"])
+    primaries = [c for c in out if c["tier"] == "primary"]
+    assert [c["ts_code"] for c in primaries] == ["600001.SH"]
+    assert primaries[0]["pattern_grade"] == "near_miss"
+
+
+def test_apply_pattern_selection_qualified_beats_near_miss():
+    launch_closes = [10.0] * 30 + [10.2, 10.4, 10.6, 10.8, 11.0, 11.3]
+    launch = _frame(launch_closes, [1000.0] * (len(launch_closes) - 1) + [2000.0])
+    near_frame = _near_frame()
+    candidates = [
+        {"ts_code": "600001.SH", "name": "A", "industry": "黄金", "score": 80.0, "tier": "primary", "evidence_score": 0.0},
+        {"ts_code": "600002.SH", "name": "B", "industry": "黄金", "score": 79.0, "tier": "watch", "evidence_score": 0.0},
+    ]
+    history = {"600001.SH": launch, "600002.SH": near_frame}
+    out = apply_pattern_selection(candidates, history, ["黄金"])
+    primaries = [c for c in out if c["tier"] == "primary"]
+    assert [c["ts_code"] for c in primaries] == ["600001.SH"]
+    assert primaries[0]["pattern_grade"] == "qualified"
 
 
 def test_stage_playbook_covers_all_stages():

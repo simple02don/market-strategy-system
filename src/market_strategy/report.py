@@ -18,6 +18,28 @@ def _pct(value: Any) -> str:
         return "—"
 
 
+def _candidate_row(c: dict[str, Any], route_names: dict[str, str]) -> str:
+    route_label = route_names.get(str(c.get("route", "")), "未确认")
+    if c.get("pattern_grade") == "near_miss":
+        route_label += "（近）"
+    pattern = c.get("pattern") or {}
+    key_levels = "—"
+    if pattern:
+        key_levels = (
+            f"支{_esc(pattern.get('support1', '—'))}｜"
+            f"压{_esc(pattern.get('resistance2', '—'))}"
+            f"（空间{_esc(pattern.get('room_to_resistance_pct', '—'))}%）"
+        )
+    return (
+        f"<tr><td>{_esc(c.get('name'))}</td><td>{_esc(c.get('ts_code'))}</td>"
+        f"<td>{_esc(c.get('tier'))}</td><td>{_esc(c.get('role'))}</td>"
+        f"<td>{_esc(c.get('score'))}</td><td>{_esc(c.get('industry'))}</td>"
+        f"<td>{_esc(route_label)}</td><td>{key_levels}</td>"
+        f"<td>{_esc(c.get('action', ''))}</td>"
+        f"<td>{_esc(c.get('confirm_conditions'))}</td></tr>"
+    )
+
+
 def generate_report(payload: dict[str, Any], output: Path) -> Path:
     trade_date = _esc(payload.get("trade_date"))
     next_day = _esc(payload.get("next_trade_date"))
@@ -123,16 +145,11 @@ def generate_report(payload: dict[str, Any], output: Path) -> Path:
     )
     if candidates:
         candidate_rows = "".join(
-            f"<tr><td>{_esc(c.get('name'))}</td><td>{_esc(c.get('ts_code'))}</td>"
-            f"<td>{_esc(c.get('tier'))}</td><td>{_esc(c.get('role'))}</td>"
-            f"<td>{_esc(c.get('score'))}</td><td>{_esc(c.get('industry'))}</td>"
-            f"<td>{_esc(route_names.get(c.get('route', ''), '未确认'))}</td>"
-            f"<td>{_esc(c.get('action', ''))}</td>"
-            f"<td>{_esc(c.get('confirm_conditions'))}</td></tr>"
-            for c in candidates[:8]
+            _candidate_row(c, route_names)
+            for c in candidates[:10]
         )
     else:
-        candidate_rows = "<tr><td colspan='9'>无合格候选（合法空仓）</td></tr>"
+        candidate_rows = "<tr><td colspan='10'>无合格候选（合法空仓）</td></tr>"
     fact_lines = "".join(f"<li>{_esc(f)}</li>" for f in (facts.get("summary") or [])[:6]) or "<li>无</li>"
     hypotheses = "".join(
         f"<li><b>{_esc(item.get('name'))}</b>（证据分 {_esc(item.get('score'))}）<br>"
@@ -233,7 +250,7 @@ th{{color:#8fa0bd;font-weight:500}}
 <div class="card"><h2>板块职责与相对强弱 Top8</h2>
 <table><tr><th>行业</th><th>职责</th><th>评分</th><th>当日</th><th>20日超额</th></tr>{sector_rows}</table></div>
 <div class="card"><h2>个股推荐</h2>
-<table><tr><th>名称</th><th>代码</th><th>层级</th><th>角色</th><th>评分</th><th>行业</th><th>形态</th><th>操作</th><th>确认条件</th></tr>{candidate_rows}</table></div>
+<table><tr><th>名称</th><th>代码</th><th>层级</th><th>角色</th><th>评分</th><th>行业</th><th>形态</th><th>支撑/压力</th><th>操作</th><th>确认条件</th></tr>{candidate_rows}</table></div>
 <div class="card"><h2>政策/公告事实要点</h2><ul>{fact_lines}</ul></div>
 	<div class="foot">本系统只生成研究与概率推演，不构成投资建议；不自动下单。<br>
 	“主力/操盘行为”是基于可见证据的竞争性假设，不代表已确认存在单一操盘主体。<br>
