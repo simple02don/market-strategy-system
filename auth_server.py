@@ -21,7 +21,7 @@ PUBLIC = os.environ.get("JCKX_PUBLIC_REPORTS", "0").strip().lower() in {"1", "tr
 BASE_PATH = urlparse(os.environ.get("JCKX_REPORT_BASE_URL", "http://10.66.0.1/strategy")).path.rstrip("/")
 
 COOKIE_NAME = "jckx_report_session"
-SESSION_SECONDS = max(3600, int(os.environ.get("JCKX_SESSION_MAX_AGE", str(30 * 24 * 3600))))
+SESSION_SECONDS = max(3600, int(os.environ.get("JCKX_SESSION_MAX_AGE", str(10 * 365 * 24 * 3600))))
 
 
 def _signature(expiry: int) -> str:
