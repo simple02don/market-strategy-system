@@ -400,6 +400,7 @@ class NightlyPipeline:
         bars = self._load_bars(latest_str, days=130)
         stocks = self.storage.listed_records()
         industry_map = {code: industry for code, _name, industry, _list_date in stocks}
+        evidence["lhb"] = build_lhb_summary(self.storage, latest_str, industry_map)
         sectors = rank_sectors(
             bars,
             latest_str,
@@ -557,7 +558,6 @@ class NightlyPipeline:
             candidates = []
             for scenario in scenarios:
                 scenario["abstain"] = True
-        evidence["lhb"] = build_lhb_summary(self.storage, latest_str, industry_map)
         evidence["operator_hypotheses"] = infer_operator_playbook(context, evidence, sectors)
         payload = {
             "trade_date": latest_str,
