@@ -162,6 +162,7 @@ def build_evidence_bundle(
     information_cutoff: str,
     impact_result: dict[str, Any] | None = None,
     facts: list[dict[str, Any]] | None = None,
+    known_industries: set[str] | None = None,
 ) -> dict[str, Any]:
     valid, filter_stats = filter_pit_items(
         items,
@@ -181,6 +182,15 @@ def build_evidence_bundle(
     evidence_rows: list[dict[str, Any]] = []
     sources: set[str] = set()
     unmapped_sector_tags = 0
+
+    def _canonical(name: Any) -> str | None:
+        canonical = _canonical_sector(name)
+        if canonical:
+            return canonical
+        value = str(name or "").strip()
+        if value and known_industries and value in known_industries:
+            return value
+        return None
 
     for item in valid:
         source_id = str(item.get("source_id") or "")
@@ -214,7 +224,7 @@ def build_evidence_bundle(
                 sector_weight[sector] += weight
         for sector in assessment.get("sectors") or []:
             name = str(sector.get("name") or "")
-            canonical = _canonical_sector(name)
+            canonical = _canonical(name)
             if canonical:
                 matched_sectors.add(canonical)
                 sector_sum[canonical] += float(sector.get("impact", 0.0) or 0.0) * weight
@@ -268,7 +278,7 @@ def build_evidence_bundle(
         text = f"{fact.get('subject', '')} {fact.get('predicate', '')} {fact.get('object', '')}"
         score, _hits = _lexical_score(text)
         for sector in links if isinstance(links, list) else []:
-            name = _canonical_sector(str(sector))
+            name = _canonical(str(sector))
             if name:
                 sector_sum[name] += score * 0.35
                 sector_weight[name] += 0.35

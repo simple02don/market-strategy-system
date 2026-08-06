@@ -379,12 +379,18 @@ class NightlyPipeline:
         )
         document_ids = [str(value) for value in fact_stats.get("document_ids", [])]
         current_facts = self.storage.facts_for_documents(document_ids)
+        known_industries = {
+            str(row[0]) for row in self.storage._conn.execute(
+                "SELECT DISTINCT industry FROM stock_basic WHERE list_status='L' AND industry IS NOT NULL AND industry != ''"
+            ).fetchall()
+        }
         evidence = build_evidence_bundle(
             news["items"],
             window_start=f"{latest_str} 00:00:00",
             information_cutoff=information_cutoff,
             impact_result=impact,
             facts=current_facts,
+            known_industries=known_industries,
         )
         context = market_context(self.storage, latest_str)
         state = classify_market_state(context, evidence=evidence)

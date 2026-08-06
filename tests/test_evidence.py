@@ -362,6 +362,33 @@ def test_operator_concentration_uses_real_top_sector_only():
     assert "黄金" in " ".join(polluted["拉主线"]["support"])
 
 
+def test_known_industries_keep_real_unmapped_tags():
+    items = [_item("cls_telegraph", "n1", "小金属涨价", "2026-08-05 20:00:00")]
+    impact = {
+        "status": "ok",
+        "assessments": {
+            "n1": {
+                "market_impact": 0.2,
+                "confidence": 0.8,
+                "horizon": "next_day",
+                "sectors": [{"name": "小金属", "impact": 0.7}],
+                "stocks": [],
+                "operator_signals": [],
+                "rationale": "测试",
+            }
+        },
+    }
+    bundle = build_evidence_bundle(
+        items,
+        window_start="2026-08-05 00:00:00",
+        information_cutoff="2026-08-05 23:00:00",
+        impact_result=impact,
+        known_industries={"小金属"},
+    )
+    assert "小金属" in bundle["sector_scores"]
+    assert bundle["sector_tags_unmapped"] == 0
+
+
 class _Predictor:
     def __init__(self, value):
         self.value = value
