@@ -132,8 +132,10 @@ def defensive_selection(
     *,
     rebound_sector: str = "",
     repair_mode: bool = False,
+    haven_sectors: set[str] | None = None,
     rebound_max: int = 3,
     repair_max: int = 3,
+    haven_max: int = 3,
     min_score: float = 55.0,
     min_watch_score: float = 50.0,
 ) -> list[dict]:
@@ -141,6 +143,7 @@ def defensive_selection(
 
     - rebound：被砸板块中形态未破位的个股，赌第一波反包；
     - repair：连续弱势/砸盘后的超跌修复候选。
+    - haven：派发期资金避风港——低位且资金净流入的板块中形态健康的个股。
     """
     out: list[dict] = []
     for cand in candidates:
@@ -157,7 +160,9 @@ def defensive_selection(
 
     rebound_taken = 0
     repair_taken = 0
+    haven_taken = 0
     watch_taken = 0
+    haven_sectors = haven_sectors or set()
     for cand in out:
         score = float(cand.get("score", 0.0))
         industry = str(cand.get("industry") or "")
@@ -187,6 +192,18 @@ def defensive_selection(
             cand["stop"] = "前低或买入价-3%"
             cand["position"] = "≤20%"
             repair_taken += 1
+        elif (
+            industry in haven_sectors
+            and qualified
+            and haven_taken < haven_max
+            and score >= min_score
+        ):
+            cand["tier"] = "haven"
+            cand["action"] = "低仓位跟随（避风港轮动）"
+            cand["trigger"] = "回踩不破MA20且板块资金延续净流入时介入"
+            cand["stop"] = "买入价-3%"
+            cand["position"] = "≤15%"
+            haven_taken += 1
         elif watch_taken < 5 and score >= min_watch_score:
             cand["tier"] = "watch"
             cand["action"] = "观察"

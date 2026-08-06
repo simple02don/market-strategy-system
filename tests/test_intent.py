@@ -116,6 +116,23 @@ def test_defensive_selection_rebound_and_repair():
     assert all(c["stop"] and c["position"] for c in rebound + repair)
 
 
+def test_defensive_selection_haven_rotation():
+    candidates = [
+        {"ts_code": "600004.SH", "name": "D", "industry": "水运", "score": 72.0, "tier": "watch", "evidence_score": 0.0},
+        {"ts_code": "600005.SH", "name": "E", "industry": "黄金", "score": 90.0, "tier": "primary", "evidence_score": 0.0},
+    ]
+    launch_closes = [10.0] * 30 + [10.2, 10.4, 10.6, 10.8, 11.0, 11.3]
+    launch = _frame(launch_closes, [1000.0] * (len(launch_closes) - 1) + [2000.0])
+    history = {"600004.SH": launch, "600005.SH": launch}
+    out = defensive_selection(
+        candidates, history, haven_sectors={"水运"}
+    )
+    haven = [c for c in out if c["tier"] == "haven"]
+    assert [c["ts_code"] for c in haven] == ["600004.SH"]
+    assert haven[0]["position"] == "≤15%"
+    assert all(c["tier"] != "haven" for c in out if c["industry"] == "黄金")
+
+
 def test_stage_playbook_covers_all_stages():
     for stage in ("吸筹", "洗盘", "拉升", "拉升高潮", "派发", "砸盘", "反包", "观望"):
         entry = STAGE_PLAYBOOK[stage]

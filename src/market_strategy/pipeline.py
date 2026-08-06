@@ -492,11 +492,24 @@ class NightlyPipeline:
                     if index < 2:
                         rebound_sector = item.get("top_sector", "")
                     break
+            haven_sectors: set[str] = set()
+            lhb = evidence.get("lhb") or {}
+            if lhb.get("available"):
+                recent_hot = {
+                    str(item.get("top_sector", ""))
+                    for item in intent_sequence[-2:]
+                }
+                haven_sectors = {
+                    str(item.get("industry", ""))
+                    for item in (lhb.get("top_inflows") or [])[:3]
+                    if str(item.get("industry", "")) not in recent_hot
+                }
             candidates = defensive_selection(
                 candidates,
                 stock_history,
                 rebound_sector=rebound_sector,
                 repair_mode=repair_mode,
+                haven_sectors=haven_sectors,
             )
         else:
             candidates = apply_pattern_selection(
@@ -754,7 +767,7 @@ class NightlyPipeline:
             f"（目标：{'、'.join(target_sectors) or '防守'}）"
         )
         defensive_cands = [
-            c for c in candidates if c.get("tier") in {"rebound", "repair"}
+            c for c in candidates if c.get("tier") in {"rebound", "repair", "haven"}
         ]
         defensive_text = ""
         if defensive_cands:

@@ -104,7 +104,7 @@ def generate_report(payload: dict[str, Any], output: Path) -> Path:
         f"<td>{_esc(c.get('trigger'))}</td><td>{_esc(c.get('stop'))}</td>"
         f"<td>{_esc(c.get('position'))}</td></tr>"
         for c in candidates
-        if c.get("tier") in {"rebound", "repair"}
+        if c.get("tier") in {"rebound", "repair", "haven"}
     )
     defensive_card = (
         "<div class='card'><h2>防守中的进攻机会</h2>"
