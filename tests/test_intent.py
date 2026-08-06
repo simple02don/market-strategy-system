@@ -94,52 +94,105 @@ def test_pattern_selection_no_primary_when_defensive():
     assert all(c["tier"] != "primary" for c in out)
 
 
-def test_daily_intent_labels():
+def _base_snap(**overrides):
     base = {
         "advance": 0.55,
+        "ret1": 0.01,
         "ret5": 0.02,
         "limit_up": 50,
         "limit_down": 5,
-        "top_sector": "黄金",
-        "top_score": 180.0,
-        "top_excess": 6.0,
-        "top_today": 1.5,
-        "concentration": 1.3,
-        "second_sector": "水运",
+        "top_sector": "半导体",
+        "top_sector_20d": "黄金",
+        "top_excess_20d": 5.0,
+        "focal_pct": 4.0,
+        "focal_limit_up": 15,
+        "focal_up_ratio": 0.9,
+        "focal_surge": 1.3,
+        "focal_stocks": 196,
+        "second_focal": "元器件",
         "lhb_net_yi": 2.0,
         "inst_net_yi": 0.5,
-        "lhb_top_industry": "黄金",
         "policy_count": 0,
+        "chase": 0.6,
+        "capitulation": 0.0,
     }
-    assert infer_daily_intent(base)["label"] == "拉主线"
-    assert infer_daily_intent({**base, "advance": 0.40})["label"] == "护指数"
-    assert infer_daily_intent({**base, "top_today": -1.5})["label"] == "兑现降风险"
-    weak = {
-        **base,
-        "advance": 0.40,
-        "ret5": -0.02,
-        "top_excess": 1.0,
-        "concentration": 1.0,
-        "lhb_net_yi": 0.0,
-        "inst_net_yi": 0.0,
-        "top_today": -0.2,
-    }
-    assert infer_daily_intent(weak)["label"] == "弱势观望"
+    base.update(overrides)
+    return base
 
 
-def _snap(label, top="黄金", policy=0):
+def test_daily_intent_labels():
+    assert infer_daily_intent(_base_snap())["label"] == "拉主线"
+    assert (
+        infer_daily_intent(
+            _base_snap(advance=0.40, focal_pct=0.5, focal_limit_up=0, chase=0.0)
+        )["label"]
+        == "护指数"
+    )
+    assert (
+        infer_daily_intent(
+            _base_snap(focal_pct=-3.0, capitulation=0.7, chase=0.0)
+        )["label"]
+        == "兑现降风险"
+    )
+    assert (
+        infer_daily_intent(
+            _base_snap(advance=0.65, focal_pct=0.5, focal_limit_up=0, chase=0.0)
+        )["label"]
+        == "普涨修复"
+    )
+    assert (
+        infer_daily_intent(
+            _base_snap(
+                advance=0.40,
+                ret1=-0.01,
+                ret5=-0.02,
+                focal_pct=0.2,
+                focal_limit_up=0,
+                chase=0.0,
+                capitulation=0.0,
+            )
+        )["label"]
+        == "弱势观望"
+    )
+
+
+def _snap(label, top="半导体", policy=0, chase=0.0, capitulation=0.0, limit_up=0, surge=1.0):
     return {
         "label": label,
         "top_sector": top,
-        "second_sector": "水运",
+        "second_focal": "元器件",
         "policy_count": policy,
+        "chase": chase,
+        "capitulation": capitulation,
+        "focal_limit_up": limit_up,
+        "focal_surge": surge,
     }
 
 
-def test_forecast_transitions():
-    assert forecast_next_intent([_snap("拉主线")] * 3)["label"] == "兑现降风险"
-    assert forecast_next_intent([_snap("拉主线")] * 2)["label"] == "拉主线"
-    assert forecast_next_intent([_snap("拉主线"), _snap("兑现降风险")])["label"] == "普涨修复"
-    assert forecast_next_intent([_snap("拉主线"), _snap("兑现降风险", policy=2)])["label"] == "政策驱动轮动"
+def test_forecast_transitions_with_malice():
+    # 连续2日同板块 + 追高信号强 → 兑现（砸盘套人风险）
+    assert (
+        forecast_next_intent([_snap("拉主线", chase=0.6, limit_up=15, surge=1.3)] * 2)["label"]
+        == "兑现降风险"
+    )
+    # 连续3日同板块，即使追高不极端也兑现
+    assert forecast_next_intent([_snap("拉主线", chase=0.0)] * 3)["label"] == "兑现降风险"
+    # 单日狂拉+大量涨停 → 次日兑现
+    assert (
+        forecast_next_intent([_snap("拉主线", chase=0.8, limit_up=25, surge=1.5)])["label"]
+        == "兑现降风险"
+    )
+    # 温和拉抬 → 延续
+    assert forecast_next_intent([_snap("拉主线", chase=0.2)] * 2)["label"] == "拉主线"
+    # 兑现 + 割肉信号 → 反包修复，目标为被砸板块
+    slammed = _snap("兑现降风险", capitulation=0.7, top="半导体")
+    assert forecast_next_intent([_snap("拉主线"), slammed])["label"] == "普涨修复"
+    assert forecast_next_intent([slammed])["target_sectors"] == ["半导体"]
+    # 兑现但无割肉 + 政策 → 轮动
+    assert (
+        forecast_next_intent([_snap("兑现降风险", capitulation=0.0, policy=2)])["label"]
+        == "政策驱动轮动"
+    )
+    # 连续观望 → 修复；单日观望 → 观望
     assert forecast_next_intent([_snap("弱势观望")] * 2)["label"] == "普涨修复"
     assert forecast_next_intent([_snap("弱势观望")])["label"] == "弱势观望"
