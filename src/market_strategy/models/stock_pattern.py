@@ -287,8 +287,12 @@ def defensive_selection(
     """
     out: list[dict] = []
     for cand in candidates:
-        frame = stock_history.get(cand.get("ts_code", ""))
-        route, detail = classify_stock_route(frame)
+        if "ma20_slope" in cand and cand.get("pattern"):
+            route = str(cand.get("route", "not_confirmed"))
+            detail = cand["pattern"]
+        else:
+            frame = stock_history.get(cand.get("ts_code", ""))
+            route, detail = classify_stock_route(frame)
         updated = {
             **cand,
             "tier": "",

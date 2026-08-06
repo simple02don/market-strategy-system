@@ -525,6 +525,11 @@ class NightlyPipeline:
                     for c in [*haven_extra, *rebound_extra]
                     if c["ts_code"] not in existing_codes
                 )
+            candidate_codes = {candidate.get("ts_code", "") for candidate in candidates}
+            stock_history = {
+                code: group
+                for code, group in bars[bars["ts_code"].isin(candidate_codes)].groupby("ts_code")
+            }
             candidates = defensive_selection(
                 candidates,
                 stock_history,
