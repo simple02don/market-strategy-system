@@ -132,6 +132,12 @@ def test_daily_stage_labels():
     )
     assert (
         infer_daily_intent(
+            _base_snap(focal_pct=5.0, focal_limit_up=20, focal_surge=1.0, upper_shadow=0.1)
+        )["stage"]
+        == "拉升高潮"
+    )
+    assert (
+        infer_daily_intent(
             _base_snap(focal_pct=-3.5, focal_surge=1.4, close_loc=0.25)
         )["stage"]
         == "砸盘"
@@ -187,6 +193,8 @@ def _snap(stage, top="半导体", surge=1.0, close_loc=0.6, limit_up=0, upper=0.
 def test_forecast_stage_machine():
     # 派发 → 砸盘
     assert forecast_next_intent([_snap("派发", limit_up=20, surge=1.5)])["label"] == "砸盘"
+    # 拉升高潮 → 次日冲高回落派发风险
+    assert forecast_next_intent([_snap("拉升高潮", limit_up=20, surge=1.2)])["label"] == "派发"
     # 砸盘 + 长下影收回 → 反包（目标为被砸板块）
     slammed = _snap("砸盘", surge=1.4, close_loc=0.55, lower=0.25)
     assert forecast_next_intent([slammed])["label"] == "反包"

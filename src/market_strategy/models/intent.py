@@ -22,6 +22,7 @@ STAGES = {
     "吸筹": "低位缩量吸筹，利空不跌、资金流入",
     "洗盘": "拉升途中放量下杀又收回（长下影），吓出浮筹",
     "拉升": "健康主升，量价配合、收盘强势",
+    "拉升高潮": "情绪高潮：强涨+涨停潮/放量但收盘强势，尚未出现明确出货结构",
     "派发": "拉高出货：涨停潮/放量/上影，追高盘聚集",
     "砸盘": "放量长阴破位，收割追高盘",
     "反包": "恐慌后低开高走快速修复",
@@ -213,11 +214,29 @@ def _stage_signals(snap: dict[str, Any]) -> tuple[dict[str, float], list[str]]:
         scores["洗盘"] += 0.7
         signals.append(f"{snap['top_sector']}下杀后长下影收回（低点{lower:.0%}影线），疑似洗盘")
     # 派发：拉高 + 涨停潮/放量/长上影，追高盘聚集
-    if focal_pct >= 3.5 and (limit_up >= 15 or surge >= 1.35 or upper >= 0.22):
+    distribution_quality = (
+        (limit_up >= 15 and (surge >= 1.2 or upper >= 0.15))
+        or (surge >= 1.35 and upper >= 0.22)
+        or (upper >= 0.3 and focal_pct >= 3)
+    )
+    if focal_pct >= 3.5 and distribution_quality:
         scores["派发"] += 0.75
         signals.append(
             f"拉高{focal_pct:+.1f}%但涨停{limit_up}家/放量{surge:.2f}x/上影{upper:.0%}，"
             "追高盘聚集，存在派发嫌疑"
+        )
+    # 拉升高潮：强涨 + 涨停潮/放量，但收盘强势、无明确出货结构
+    climax = bool(
+        focal_pct >= 3.5
+        and close_loc >= 0.6
+        and (limit_up >= 15 or surge >= 1.3)
+        and not distribution_quality
+    )
+    if climax:
+        scores["拉升高潮"] += 0.7
+        signals.append(
+            f"{snap['top_sector']}情绪高潮（{focal_pct:+.1f}%、涨停{limit_up}家、"
+            f"收盘位置{close_loc:.2f}），追高盘大量进场"
         )
     # 拉升：健康主升，收盘强势、量价配合
     if 1.5 <= focal_pct < 6.5 and close_loc >= 0.55 and surge <= 1.5 and limit_up < 15:
@@ -304,6 +323,16 @@ def forecast_next_intent(sequence: list[dict[str, Any]]) -> dict[str, Any]:
             "reason": (
                 f"{top}出现派发特征（涨停{limit_up}家/量能{surge:.2f}x/上影），"
                 "主力倾向次日砸盘兑现，散户追高盘是主要对手"
+            ),
+        }
+    if stage == "拉升高潮":
+        return {
+            "label": "派发",
+            "confidence": 0.55,
+            "target_sectors": [],
+            "reason": (
+                f"{top}情绪高潮（涨停{limit_up}家/量能{surge:.2f}x），"
+                "次日防冲高回落进入派发"
             ),
         }
     if stage == "砸盘":
