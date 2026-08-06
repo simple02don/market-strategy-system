@@ -136,6 +136,31 @@ def test_daily_stage_labels():
         )["stage"]
         == "拉升高潮"
     )
+    # 8/4 式：涨停潮但量能未放大、上影不极端 → 拉升高潮
+    assert (
+        infer_daily_intent(
+            _base_snap(
+                focal_pct=5.7,
+                focal_limit_up=22,
+                focal_surge=0.84,
+                upper_shadow=0.18,
+                close_loc=0.81,
+            )
+        )["stage"]
+        == "拉升高潮"
+    )
+    # 8/5 式：涨停潮 + 明显上影 → 派发
+    assert (
+        infer_daily_intent(
+            _base_snap(
+                focal_pct=5.5,
+                focal_limit_up=21,
+                focal_surge=1.06,
+                upper_shadow=0.22,
+            )
+        )["stage"]
+        == "派发"
+    )
     assert (
         infer_daily_intent(
             _base_snap(focal_pct=-3.5, focal_surge=1.4, close_loc=0.25)

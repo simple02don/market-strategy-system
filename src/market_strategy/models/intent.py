@@ -215,7 +215,7 @@ def _stage_signals(snap: dict[str, Any]) -> tuple[dict[str, float], list[str]]:
         signals.append(f"{snap['top_sector']}下杀后长下影收回（低点{lower:.0%}影线），疑似洗盘")
     # 派发：拉高 + 涨停潮/放量/长上影，追高盘聚集
     distribution_quality = (
-        (limit_up >= 15 and (surge >= 1.2 or upper >= 0.15))
+        (limit_up >= 15 and (surge >= 1.2 or upper >= 0.22))
         or (surge >= 1.35 and upper >= 0.22)
         or (upper >= 0.3 and focal_pct >= 3)
     )
