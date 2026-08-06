@@ -126,6 +126,77 @@ ROUTE_BONUS = {
 }
 
 
+def defensive_selection(
+    candidates: list[dict],
+    stock_history: dict[str, pd.DataFrame],
+    *,
+    rebound_sector: str = "",
+    repair_mode: bool = False,
+    rebound_max: int = 3,
+    repair_max: int = 3,
+    min_score: float = 55.0,
+    min_watch_score: float = 50.0,
+) -> list[dict]:
+    """防守期的进攻机会：反包猎手 + 超跌修复，均带触发条件与仓位上限。
+
+    - rebound：被砸板块中形态未破位的个股，赌第一波反包；
+    - repair：连续弱势/砸盘后的超跌修复候选。
+    """
+    out: list[dict] = []
+    for cand in candidates:
+        frame = stock_history.get(cand.get("ts_code", ""))
+        route, detail = classify_stock_route(frame)
+        updated = {
+            **cand,
+            "route": route,
+            "pattern": detail,
+            "score": round(float(cand.get("score", 0.0)) + ROUTE_BONUS[route], 2),
+        }
+        out.append(updated)
+    out.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+
+    rebound_taken = 0
+    repair_taken = 0
+    watch_taken = 0
+    for cand in out:
+        score = float(cand.get("score", 0.0))
+        industry = str(cand.get("industry") or "")
+        qualified = cand["route"] != "not_confirmed"
+        if (
+            rebound_sector
+            and industry == rebound_sector
+            and qualified
+            and rebound_taken < rebound_max
+            and score >= min_score
+        ):
+            cand["tier"] = "rebound"
+            cand["action"] = "条件买入（反包猎手）"
+            cand["trigger"] = "次日低开不破前低且分时放量反包时买入"
+            cand["stop"] = "买入价-3%或跌破前低离场"
+            cand["position"] = "≤30%"
+            rebound_taken += 1
+        elif (
+            repair_mode
+            and qualified
+            and repair_taken < repair_max
+            and score >= min_score
+        ):
+            cand["tier"] = "repair"
+            cand["action"] = "分批低吸（超跌修复）"
+            cand["trigger"] = "出现首根放量阳线或长下影企稳后分批介入"
+            cand["stop"] = "前低或买入价-3%"
+            cand["position"] = "≤20%"
+            repair_taken += 1
+        elif watch_taken < 5 and score >= min_watch_score:
+            cand["tier"] = "watch"
+            cand["action"] = "观察"
+            watch_taken += 1
+        else:
+            cand["tier"] = "risk_control"
+            cand["action"] = "回避"
+    return out
+
+
 def apply_pattern_selection(
     candidates: list[dict],
     stock_history: dict[str, pd.DataFrame],

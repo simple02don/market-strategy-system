@@ -20,9 +20,9 @@ from .features.evidence import build_evidence_bundle, canonical_title, filter_pi
 from .features.lhb import build_lhb_summary
 from .features.market import market_context
 from .models import build_scenarios, classify_market_state, rank_sectors, rank_stocks
-from .models.intent import forecast_next_intent, infer_intent_sequence
+from .models.intent import STAGE_PLAYBOOK, forecast_next_intent, infer_intent_sequence
 from .models.operator import infer_operator_playbook
-from .models.stock_pattern import apply_pattern_selection
+from .models.stock_pattern import apply_pattern_selection, defensive_selection
 from .models.inference import (
     component_approved,
     infer_market,
@@ -480,12 +480,39 @@ class NightlyPipeline:
             code: group
             for code, group in bars[bars["ts_code"].isin(candidate_codes)].groupby("ts_code")
         }
-        candidates = apply_pattern_selection(
-            candidates,
-            stock_history,
-            target_sectors,
-            min_primary_score=config.env_float("PRIMARY_RULE_MIN_SCORE", 75.0),
-        )
+        defensive_mode = not target_sectors
+        rebound_sector = ""
+        if defensive_mode:
+            repair_mode = bool(
+                intent_sequence
+                and any(item["stage"] in {"观望", "砸盘"} for item in intent_sequence[-2:])
+            )
+            for index, item in enumerate(reversed(intent_sequence)):
+                if item["stage"] in {"砸盘", "派发"}:
+                    if index < 2:
+                        rebound_sector = item.get("top_sector", "")
+                    break
+            candidates = defensive_selection(
+                candidates,
+                stock_history,
+                rebound_sector=rebound_sector,
+                repair_mode=repair_mode,
+            )
+        else:
+            candidates = apply_pattern_selection(
+                candidates,
+                stock_history,
+                target_sectors,
+                min_primary_score=config.env_float("PRIMARY_RULE_MIN_SCORE", 75.0),
+            )
+        last_stage = intent_sequence[-1]["stage"] if intent_sequence else "观望"
+        forecast_stage = intent_forecast.get("label", "观望")
+        stage_playbook = {
+            "last_stage": last_stage,
+            "last": STAGE_PLAYBOOK.get(last_stage, {}),
+            "forecast_stage": forecast_stage,
+            "forecast": STAGE_PLAYBOOK.get(forecast_stage, {}),
+        }
         model_version_effective = f"{model_version_effective}+intent_v1"
         latest_dt = datetime.strptime(latest_str, "%Y%m%d")
         next_dt = datetime.strptime(next_day_str, "%Y%m%d")
@@ -564,6 +591,9 @@ class NightlyPipeline:
             ],
             "intent_forecast": intent_forecast,
             "target_sectors": target_sectors,
+            "defensive_mode": defensive_mode,
+            "defensive_rebound_sector": rebound_sector,
+            "stage_playbook": stage_playbook,
             "summary": f"市场{state.get('label')}；下一交易日{next_day_str}；"
             f"{len(candidates)} 只候选进入观察。",
         }
@@ -723,6 +753,20 @@ class NightlyPipeline:
             f"\n> 主力预判：{intent_forecast.get('label', '—')}"
             f"（目标：{'、'.join(target_sectors) or '防守'}）"
         )
+        defensive_cands = [
+            c for c in candidates if c.get("tier") in {"rebound", "repair"}
+        ]
+        defensive_text = ""
+        if defensive_cands:
+            names = "、".join(
+                f"{c.get('name')}({c.get('ts_code', '').split('.')[0]})"
+                for c in defensive_cands[:3]
+            )
+            defensive_text = (
+                f"\n> 防守机会：{names}"
+                f"（触发：{defensive_cands[0].get('trigger', '')}"
+                f"，仓位{defensive_cands[0].get('position', '')}）"
+            )
         if candidates:
             primary = [c for c in candidates if c.get("tier") == "primary"][:3]
             pick_text = "、".join(
@@ -738,6 +782,7 @@ class NightlyPipeline:
             f"> 行为假设：{hypothesis_text}（证据置信度 {float(evidence.get('confidence', 0)) * 100:.0f}%）\n"
             f"{lhb_text}\n"
             f"{forecast_text}\n"
+            f"{defensive_text}\n"
             f"> 主推荐：{pick_text}\n"
             f"> 系统状态：{payload.get('system_status')}\n"
             f"> 决策时点 {payload.get('decision_time')} · 信息截止 {payload.get('information_cutoff')}\n"

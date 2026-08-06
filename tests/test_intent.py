@@ -7,7 +7,9 @@ from market_strategy.models.intent import (
 from market_strategy.models.stock_pattern import (
     apply_pattern_selection,
     classify_stock_route,
+    defensive_selection,
 )
+from market_strategy.models.intent import STAGE_PLAYBOOK
 
 
 def _frame(closes, vols=None):
@@ -91,6 +93,33 @@ def test_pattern_selection_no_primary_when_defensive():
     history = {"600001.SH": _frame([10.0] * 30 + [10.2, 10.4, 10.6, 10.8, 11.0, 11.3])}
     out = apply_pattern_selection(candidates, history, [])
     assert all(c["tier"] != "primary" for c in out)
+
+
+def test_defensive_selection_rebound_and_repair():
+    candidates = [
+        {"ts_code": "600001.SH", "name": "A", "industry": "黄金", "score": 80.0, "tier": "primary", "evidence_score": 0.0},
+        {"ts_code": "600002.SH", "name": "B", "industry": "水运", "score": 75.0, "tier": "watch", "evidence_score": 0.0},
+        {"ts_code": "600003.SH", "name": "C", "industry": "黄金", "score": 70.0, "tier": "watch", "evidence_score": 0.0},
+    ]
+    launch_closes = [10.0] * 30 + [10.2, 10.4, 10.6, 10.8, 11.0, 11.3]
+    launch = _frame(launch_closes, [1000.0] * (len(launch_closes) - 1) + [2000.0])
+    flat = _frame([10.0] * 60)
+    history = {"600001.SH": launch, "600002.SH": launch, "600003.SH": flat}
+    out = defensive_selection(
+        candidates, history, rebound_sector="黄金", repair_mode=True
+    )
+    rebound = [c for c in out if c["tier"] == "rebound"]
+    repair = [c for c in out if c["tier"] == "repair"]
+    assert [c["ts_code"] for c in rebound] == ["600001.SH"]
+    assert "600002.SH" in [c["ts_code"] for c in repair]
+    assert all(c["trigger"] for c in rebound + repair)
+    assert all(c["stop"] and c["position"] for c in rebound + repair)
+
+
+def test_stage_playbook_covers_all_stages():
+    for stage in ("吸筹", "洗盘", "拉升", "拉升高潮", "派发", "砸盘", "反包", "观望"):
+        entry = STAGE_PLAYBOOK[stage]
+        assert entry["action"] and entry["tactics"] and entry["risk"]
 
 
 def _base_snap(**overrides):
