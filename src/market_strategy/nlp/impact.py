@@ -192,7 +192,7 @@ def assess_news_impact(
         stocks = []
         for stock in row.get("stocks") or []:
             code = str(stock.get("code") or "") if isinstance(stock, dict) else ""
-            if re.fullmatch(r"[036]\d{5}", code):
+            if re.fullmatch(r"[036]\d{5}", code) and not code.startswith(("688", "689")):
                 stocks.append(
                     {"code": code, "impact": _clip(stock.get("impact"), -1.0, 1.0)}
                 )

@@ -27,6 +27,7 @@ RISK_WORDS = {"风险", "调查", "处罚", "违约", "退市", "下滑", "亏�
 POLICY_WORDS = {"国务院", "证监会", "央行", "发改委", "工信部", "财政部", "政策", "规划", "意见"}
 
 SECTOR_TERMS = {
+    "黄金": ("黄金", "贵金属", "金价", "金矿"),
     "半导体": ("半导体", "芯片", "集成电路", "晶圆", "光刻"),
     "元器件": ("元器件", "电子元件", "PCB", "被动元件"),
     "软件服务": ("软件", "人工智能", "AI", "大模型", "云计算", "信创"),
@@ -41,6 +42,22 @@ SECTOR_TERMS = {
     "化工": ("化工", "化学", "化肥", "农药"),
     "消费": ("消费", "零售", "食品饮料", "家电", "以旧换新"),
     "军工": ("军工", "国防", "航空航天", "卫星"),
+}
+
+# LLM 常输出的自由标签 → 行业分类（仅用于标签规范化，不参与正文匹配）
+SECTOR_ALIASES = {
+    "ai": "软件服务", "ai硬件": "软件服务", "ai营销": "软件服务",
+    "tmt": "软件服务", "算力": "软件服务", "算力硬件": "软件服务",
+    "cpo": "通信设备", "光模块": "通信设备",
+    "创新药": "医药", "医疗保健": "医药", "生物医药": "医药", "减肥药": "医药",
+    "贵金属": "黄金", "金价": "黄金",
+    "功率半导体": "半导体", "存储芯片": "半导体", "半导体材料": "半导体",
+    "半导体设备": "半导体",
+    "消费电子": "元器件",
+    "智能驾驶": "汽车类", "车路云": "汽车类",
+    "券商": "证券",
+    "光伏": "电气设备", "风电": "电气设备", "储能": "电气设备", "锂电": "电气设备",
+    "数字货币": "证券",
 }
 
 
@@ -61,6 +78,23 @@ def canonical_title(title: Any) -> str:
     text = re.sub(r"\s+", "", str(title or "").lower())
     text = re.sub(r"[【】\[\]（）()：:，,。.!！?？\-—_]+", "", text)
     return text[:180]
+
+
+def _canonical_sector(name: Any) -> str | None:
+    """把 LLM 自由标签规范化为行业分类；无法映射返回 None。"""
+    value = str(name or "").strip()
+    if not value:
+        return None
+    if value in SECTOR_TERMS:
+        return value
+    lowered = value.lower()
+    alias = SECTOR_ALIASES.get(lowered)
+    if alias:
+        return alias
+    for canonical, terms in SECTOR_TERMS.items():
+        if any(term.lower() in lowered for term in terms if len(term) >= 2):
+            return canonical
+    return None
 
 
 def filter_pit_items(
@@ -146,6 +180,7 @@ def build_evidence_bundle(
     action_weights: dict[str, float] = defaultdict(float)
     evidence_rows: list[dict[str, Any]] = []
     sources: set[str] = set()
+    unmapped_sector_tags = 0
 
     for item in valid:
         source_id = str(item.get("source_id") or "")
@@ -179,13 +214,21 @@ def build_evidence_bundle(
                 sector_weight[sector] += weight
         for sector in assessment.get("sectors") or []:
             name = str(sector.get("name") or "")
-            if name:
-                matched_sectors.add(name)
-                sector_sum[name] += float(sector.get("impact", 0.0) or 0.0) * weight
-                sector_weight[name] += weight
-        codes = set(re.findall(r"(?<!\d)([036]\d{5})(?!\d)", text))
+            canonical = _canonical_sector(name)
+            if canonical:
+                matched_sectors.add(canonical)
+                sector_sum[canonical] += float(sector.get("impact", 0.0) or 0.0) * weight
+                sector_weight[canonical] += weight
+            elif name:
+                unmapped_sector_tags += 1
+        codes = {
+            code for code in re.findall(r"(?<!\d)([036]\d{5})(?!\d)", text)
+            if not code.startswith(("688", "689"))
+        }
         for stock in assessment.get("stocks") or []:
-            codes.add(str(stock.get("code") or ""))
+            code = str(stock.get("code") or "")
+            if re.fullmatch(r"[036]\d{5}", code) and not code.startswith(("688", "689")):
+                codes.add(code)
         impact_by_code = {
             str(stock.get("code") or ""): float(stock.get("impact", combined) or 0.0)
             for stock in assessment.get("stocks") or []
@@ -225,9 +268,12 @@ def build_evidence_bundle(
         text = f"{fact.get('subject', '')} {fact.get('predicate', '')} {fact.get('object', '')}"
         score, _hits = _lexical_score(text)
         for sector in links if isinstance(links, list) else []:
-            name = str(sector)
-            sector_sum[name] += score * 0.35
-            sector_weight[name] += 0.35
+            name = _canonical_sector(str(sector))
+            if name:
+                sector_sum[name] += score * 0.35
+                sector_weight[name] += 0.35
+            elif sector:
+                unmapped_sector_tags += 1
 
     market_sentiment = market_numerator / market_weight if market_weight else 0.0
     source_groups = {
@@ -270,6 +316,7 @@ def build_evidence_bundle(
         "risk_score": round(min(1.0, risk_weight / max(0.5, market_weight)), 4),
         "policy_intensity": round(min(1.0, policy_weight / max(0.5, market_weight)), 4),
         "sector_scores": sector_scores,
+        "sector_tags_unmapped": unmapped_sector_tags,
         "stock_scores": stock_scores,
         "operator_hypotheses": actions,
         "top_evidence": evidence_rows[:12],

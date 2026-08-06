@@ -271,6 +271,97 @@ def test_operator_lhb_outflow_boosts_release():
     assert by_name["兑现降风险"]["score"] > 0.3
 
 
+def test_sector_tags_are_canonicalized_and_unmapped_dropped():
+    items = [
+        _item("cls_telegraph", "n1", "贵金属与CPO热度上升", "2026-08-05 20:00:00")
+    ]
+    impact = {
+        "status": "ok",
+        "assessments": {
+            "n1": {
+                "market_impact": 0.2,
+                "confidence": 0.8,
+                "horizon": "next_day",
+                "sectors": [
+                    {"name": "贵金属", "impact": 0.8},
+                    {"name": "CPO", "impact": 0.7},
+                    {"name": "美股", "impact": 0.9},
+                ],
+                "stocks": [],
+                "operator_signals": [],
+                "rationale": "测试",
+            }
+        },
+    }
+    bundle = build_evidence_bundle(
+        items,
+        window_start="2026-08-05 00:00:00",
+        information_cutoff="2026-08-05 23:00:00",
+        impact_result=impact,
+    )
+    assert "黄金" in bundle["sector_scores"]
+    assert "通信设备" in bundle["sector_scores"]
+    assert "美股" not in bundle["sector_scores"]
+    assert "CPO" not in bundle["sector_scores"]
+    assert bundle["sector_tags_unmapped"] == 1
+
+
+def test_stock_evidence_ignores_star_market_codes():
+    items = [
+        _item(
+            "cninfo_disclosure",
+            "d1",
+            "688496 重大违法退市风险提示",
+            "2026-08-05 21:00:00",
+            tier=1,
+        )
+    ]
+    impact = {
+        "status": "ok",
+        "assessments": {
+            "d1": {
+                "market_impact": -0.5,
+                "confidence": 0.9,
+                "horizon": "next_day",
+                "sectors": [],
+                "stocks": [{"code": "688496", "impact": -0.9}],
+                "operator_signals": [],
+                "rationale": "退市风险",
+            }
+        },
+    }
+    bundle = build_evidence_bundle(
+        items,
+        window_start="2026-08-05 00:00:00",
+        information_cutoff="2026-08-05 23:00:00",
+        impact_result=impact,
+    )
+    assert "688496" not in bundle["stock_scores"]
+
+
+def test_operator_concentration_uses_real_top_sector_only():
+    def playbook_with_scores(scores):
+        context = {"breadth": {"advance_ratio": 0.55}, "ret_5d": 0.01}
+        evidence = {
+            "market_sentiment": 0.1,
+            "confidence": 0.7,
+            "policy_intensity": 0.0,
+            "risk_score": 0.0,
+            "sector_scores": scores,
+            "lhb": {"available": False},
+        }
+        sectors = [
+            {"industry": "黄金", "score": 80.0},
+            {"industry": "水运", "score": 60.0},
+        ]
+        return {h["name"]: h for h in infer_operator_playbook(context, evidence, sectors)}
+
+    base = playbook_with_scores({"黄金": 0.5, "水运": 0.2})
+    polluted = playbook_with_scores({"黄金": 0.5, "水运": 0.2, "CPO": 0.9})
+    assert base["拉主线"]["score"] == polluted["拉主线"]["score"]
+    assert "黄金" in " ".join(polluted["拉主线"]["support"])
+
+
 class _Predictor:
     def __init__(self, value):
         self.value = value

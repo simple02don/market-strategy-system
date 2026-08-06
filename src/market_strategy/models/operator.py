@@ -28,7 +28,6 @@ def infer_operator_playbook(
         str(item.get("industry", "")) for item in lhb.get("top_outflows", [])
     }
     inst_net_yi = float(lhb.get("inst_net_buy_total_yi", 0.0) or 0.0)
-    top_sector_industry = str(top_sector.get("industry", "")) if top_sector else ""
     lhb_support_text = (
         f"龙虎榜净买入靠前：{'、'.join(str(i.get('industry', '')) for i in lhb.get('top_inflows', [])[:2])}"
         if lhb.get("top_inflows")
@@ -39,9 +38,13 @@ def infer_operator_playbook(
         if lhb.get("top_outflows")
         else ""
     )
+    top_sector_industry = str(top_sector.get("industry", "")) if top_sector else ""
+    second_sector_industry = str(second_sector.get("industry", "")) if second_sector else ""
     concentration = max(
-        [abs(float(value or 0.0)) for value in sector_evidence.values()] or [0.0]
+        abs(float(sector_evidence.get(top_sector_industry, 0.0) or 0.0)),
+        abs(float(sector_evidence.get(second_sector_industry, 0.0) or 0.0)),
     )
+    top_sector_evidence = float(sector_evidence.get(top_sector_industry, 0.0) or 0.0)
 
     hypotheses: list[dict[str, Any]] = []
 
@@ -94,7 +97,8 @@ def infer_operator_playbook(
         "拉主线",
         lead_score,
         [
-            f"资讯最集中方向：{max(sector_evidence, key=lambda key: abs(sector_evidence[key]))}" if sector_evidence else "",
+            f"资讯证据最集中的实际板块：{top_sector_industry}（{top_sector_evidence:+.2f}）"
+            if top_sector_industry and abs(top_sector_evidence) >= 0.1 else "",
             f"板块首位{top_sector.get('industry')}，评分{top_sector.get('score')}" if top_sector else "",
             lhb_support_text,
         ],
