@@ -26,6 +26,9 @@ def generate_report(payload: dict[str, Any], output: Path) -> Path:
     scenarios = payload.get("scenarios") or []
     sectors = payload.get("sectors") or []
     candidates = payload.get("candidates") or []
+    intent_sequence = payload.get("intent_sequence") or []
+    intent_forecast = payload.get("intent_forecast") or {}
+    target_sectors = payload.get("target_sectors") or []
     facts = payload.get("facts") or {}
     evidence = payload.get("evidence") or {}
     lhb = evidence.get("lhb") or {}
@@ -46,6 +49,24 @@ def generate_report(payload: dict[str, Any], output: Path) -> Path:
         f"<tr><td>{_esc(s.get('name'))}</td><td>{_pct(s.get('probability'))}</td></tr>"
         for s in scenarios
     )
+    intent_lines = " → ".join(
+        f"{_esc(str(item.get('trade_date', ''))[-4:])} {_esc(item.get('label', ''))}"
+        for item in intent_sequence[-5:]
+    ) or "数据不足"
+    route_names = {
+        "just_started": "刚启动",
+        "controlled_pullback": "可控回踩",
+        "rising_trend": "上升趋势",
+        "not_confirmed": "未确认",
+    }
+    forecast_card = (
+        "<div class='card'><h2>主力意图推演（过去5日 → 下一交易日）</h2>"
+        f"<p>{intent_lines}</p>"
+        f"<p>预判：<b>{_esc(intent_forecast.get('label', '—'))}</b>"
+        f"（置信度 {_pct(intent_forecast.get('confidence', 0))}）· "
+        f"目标板块：{_esc('、'.join(target_sectors) or '防守 / 无明确目标')}</p>"
+        f"<p>{_esc(intent_forecast.get('reason', ''))}</p></div>"
+    )
     sector_rows = "".join(
         f"<tr><td>{_esc(s.get('industry'))}</td><td>{_esc(s.get('role'))}</td>"
         f"<td>{_esc(s.get('score'))}</td><td>{_esc(s.get('today_pct'))}%</td>"
@@ -57,11 +78,12 @@ def generate_report(payload: dict[str, Any], output: Path) -> Path:
             f"<tr><td>{_esc(c.get('name'))}</td><td>{_esc(c.get('ts_code'))}</td>"
             f"<td>{_esc(c.get('tier'))}</td><td>{_esc(c.get('role'))}</td>"
             f"<td>{_esc(c.get('score'))}</td><td>{_esc(c.get('industry'))}</td>"
+            f"<td>{_esc(route_names.get(c.get('route', ''), '未确认'))}</td>"
             f"<td>{_esc(c.get('confirm_conditions'))}</td></tr>"
             for c in candidates[:8]
         )
     else:
-        candidate_rows = "<tr><td colspan='7'>无合格候选（合法空仓）</td></tr>"
+        candidate_rows = "<tr><td colspan='8'>无合格候选（合法空仓）</td></tr>"
     fact_lines = "".join(f"<li>{_esc(f)}</li>" for f in (facts.get("summary") or [])[:6]) or "<li>无</li>"
     hypotheses = "".join(
         f"<li><b>{_esc(item.get('name'))}</b>（证据分 {_esc(item.get('score'))}）<br>"
@@ -144,6 +166,7 @@ th{{color:#8fa0bd;font-weight:500}}
 <div class="card"><h2>今日市场状态</h2>
 <p>主导：<b>{_esc(state.get('label'))}</b>（{_esc(state.get('model_version'))}）</p>
 <table><tr><th>状态</th><th>概率</th></tr>{state_rows}</table></div>
+	{forecast_card}
 <div class="card"><h2>市场宽度</h2>
 <p>上涨 {_esc(breadth.get('up'))} / 下跌 {_esc(breadth.get('down'))} · 涨停 {_esc(breadth.get('limit_up'))} / 跌停 {_esc(breadth.get('limit_down'))}
 · 60日新高 {_esc(breadth.get('new_high_60d'))} / 新低 {_esc(breadth.get('new_low_60d'))}</p></div>
@@ -158,7 +181,7 @@ th{{color:#8fa0bd;font-weight:500}}
 <div class="card"><h2>板块职责与相对强弱 Top8</h2>
 <table><tr><th>行业</th><th>职责</th><th>评分</th><th>当日</th><th>20日超额</th></tr>{sector_rows}</table></div>
 <div class="card"><h2>个股推荐</h2>
-<table><tr><th>名称</th><th>代码</th><th>层级</th><th>角色</th><th>评分</th><th>行业</th><th>确认条件</th></tr>{candidate_rows}</table></div>
+<table><tr><th>名称</th><th>代码</th><th>层级</th><th>角色</th><th>评分</th><th>行业</th><th>形态</th><th>确认条件</th></tr>{candidate_rows}</table></div>
 <div class="card"><h2>政策/公告事实要点</h2><ul>{fact_lines}</ul></div>
 	<div class="foot">本系统只生成研究与概率推演，不构成投资建议；不自动下单。<br>
 	“主力/操盘行为”是基于可见证据的竞争性假设，不代表已确认存在单一操盘主体。<br>

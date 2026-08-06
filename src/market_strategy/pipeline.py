@@ -20,7 +20,9 @@ from .features.evidence import build_evidence_bundle, canonical_title, filter_pi
 from .features.lhb import build_lhb_summary
 from .features.market import market_context
 from .models import build_scenarios, classify_market_state, rank_sectors, rank_stocks
+from .models.intent import forecast_next_intent, infer_intent_sequence
 from .models.operator import infer_operator_playbook
+from .models.stock_pattern import apply_pattern_selection
 from .models.inference import (
     component_approved,
     infer_market,
@@ -455,6 +457,36 @@ class NightlyPipeline:
             if stock_last and component_approved(models, "stock"):
                 candidates = infer_stocks(models, stock_last, candidates, evidence=evidence)
                 model_version_effective = f"lgbm_v{(models.get('meta') or {}).get('version', 0)}"
+        index_daily_df = pd.read_sql_query(
+            """
+            SELECT trade_date, close FROM index_daily
+            WHERE ts_code='000001.SH' AND trade_date <= ?
+            """,
+            self.storage._conn,
+            params=(latest_str,),
+        )
+        intent_sequence = infer_intent_sequence(
+            bars,
+            index_daily_df,
+            industry_map,
+            self.storage,
+            end_date=latest_str,
+            days=5,
+        )
+        intent_forecast = forecast_next_intent(intent_sequence)
+        target_sectors = list(intent_forecast.get("target_sectors") or [])
+        candidate_codes = {candidate.get("ts_code", "") for candidate in candidates}
+        stock_history = {
+            code: group
+            for code, group in bars[bars["ts_code"].isin(candidate_codes)].groupby("ts_code")
+        }
+        candidates = apply_pattern_selection(
+            candidates,
+            stock_history,
+            target_sectors,
+            min_primary_score=config.env_float("PRIMARY_RULE_MIN_SCORE", 75.0),
+        )
+        model_version_effective = f"{model_version_effective}+intent_v1"
         latest_dt = datetime.strptime(latest_str, "%Y%m%d")
         next_dt = datetime.strptime(next_day_str, "%Y%m%d")
         data_ok = (
@@ -518,6 +550,18 @@ class NightlyPipeline:
                 "evidence_ok": evidence_ok,
             },
             "model_version": model_version_effective,
+            "intent_sequence": [
+                {
+                    "trade_date": item["trade_date"],
+                    "label": item["label"],
+                    "strength": item["strength"],
+                    "top_sector": item.get("top_sector", ""),
+                    "reasons": item.get("reasons", []),
+                }
+                for item in intent_sequence
+            ],
+            "intent_forecast": intent_forecast,
+            "target_sectors": target_sectors,
             "summary": f"市场{state.get('label')}；下一交易日{next_day_str}；"
             f"{len(candidates)} 只候选进入观察。",
         }
@@ -671,6 +715,12 @@ class NightlyPipeline:
                 f"\n> 龙虎榜净买入：{inflow} · 机构净买入 "
                 f"{float(inst):+.1f} 亿"
             )
+        intent_forecast = payload.get("intent_forecast") or {}
+        target_sectors = payload.get("target_sectors") or []
+        forecast_text = (
+            f"\n> 主力预判：{intent_forecast.get('label', '—')}"
+            f"（目标：{'、'.join(target_sectors) or '防守'}）"
+        )
         if candidates:
             primary = [c for c in candidates if c.get("tier") == "primary"][:3]
             pick_text = "、".join(
@@ -685,6 +735,7 @@ class NightlyPipeline:
             f"> 强势板块：{sector_text}\n"
             f"> 行为假设：{hypothesis_text}（证据置信度 {float(evidence.get('confidence', 0)) * 100:.0f}%）\n"
             f"{lhb_text}\n"
+            f"{forecast_text}\n"
             f"> 主推荐：{pick_text}\n"
             f"> 系统状态：{payload.get('system_status')}\n"
             f"> 决策时点 {payload.get('decision_time')} · 信息截止 {payload.get('information_cutoff')}\n"
