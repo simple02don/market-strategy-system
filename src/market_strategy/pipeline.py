@@ -505,6 +505,24 @@ class NightlyPipeline:
                     for item in (lhb.get("top_inflows") or [])[:3]
                     if str(item.get("industry", "")) not in recent_hot
                 }
+            extra_industries = set(haven_sectors)
+            if rebound_sector:
+                extra_industries.add(rebound_sector)
+            if extra_industries:
+                subset_stocks = [s for s in stocks if s[2] in extra_industries]
+                if subset_stocks:
+                    extra_candidates = rank_stocks(
+                        bars,
+                        basics,
+                        subset_stocks,
+                        latest_str,
+                        industry_excess=industry_excess,
+                        stock_evidence=evidence.get("stock_scores") or {},
+                    )
+                    existing_codes = {candidate.get("ts_code") for candidate in candidates}
+                    candidates.extend(
+                        c for c in extra_candidates if c["ts_code"] not in existing_codes
+                    )
             candidates = defensive_selection(
                 candidates,
                 stock_history,
