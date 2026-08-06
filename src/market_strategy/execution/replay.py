@@ -91,7 +91,7 @@ def run_replay(
         ts_code = str(record.get("entity") or "")
         trade_date = str(record.get("trade_date") or "")
         rows = storage.minute_bars(ts_code, trade_date)
-        if not rows:
+        if len(rows) < 30:
             fetched = fetch_minute_bars(ts_code, trade_date, provider=provider)
             if fetched:
                 storage.upsert_minute_bars(fetched)

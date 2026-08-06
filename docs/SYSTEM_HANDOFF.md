@@ -15,7 +15,7 @@
 | 数据 | SQLite `data/market_strategy.sqlite3`，最新行情日 20260805（2026-08-06 晚间将自动补 20260806） |
 | 模型 | `models/artifacts/v1`、`v2`（gitignored）；v2 组件未获批准 → 线上走规则基线 `rule_v1` |
 | 推送 | 企业微信 webhook 正常；8/7 报告已推送（run 21，8/5 数据版）；今晚 23:00 会用 8/6 数据再推一次（数据新鲜度防重保证不会被跳过） |
-| 报告访问 | 公网 HTTPS `https://43.136.54.243/strategy/`（登录密码 + 限速），WireGuard 内网 `http://10.66.0.1/strategy/` 仍可用 |
+| 报告访问 | 公网 HTTPS：市场策略 `https://43.136.54.243/strategy/`、JCKX 原报告 `https://43.136.54.243/jckx/`（均登录密码 + 限速）；WireGuard 内网路径不变 |
 | 证书 | Let's Encrypt 短效 IP 证书已续期（8/12 到期），每 6 小时自动续期并 reload nginx |
 
 ## 2. 常用命令
@@ -76,11 +76,13 @@ execution_replay / minute_bar / train_experiment`
 - 主推荐行业分散：`PRIMARY_MAX_SAME_INDUSTRY=2`（规则与模型两条路径都生效）
 - 指数回退源：Tushare → 腾讯日 K（东财会拦截 python requests，已弃用）
 - 分钟级回放：Tushare `stk_mins`（主）→ 新浪（当日）→ 东财 curl（兜底）；
-  23:15 对到期候选回放“高开≤3% 且 15 分钟站稳分时均线”等确认/取消条件
+  23:15 对到期候选回放“高开≤3% 且 15 分钟站稳分时均线”等确认/取消条件；
+  回放有独立重试队列（`pending_replays`），当天分钟数据缺失次日会自动补
 - 训练实验记录：`train_experiment` 表 + `train-log`；市场模型 walk-forward
   稳定性指标（8 折，暂只参考不进晋级门槛）
-- 公网报告：nginx 443 HTTPS（仅 `/strategy/`，登录+限速，Secure cookie），
-  80 口 ACME 验证；WireGuard 路径不变，JCKX 原报告仍仅内网
+- 公网报告：nginx 443 HTTPS（`/strategy/` 与 `/jckx/`，登录+限速，Secure cookie，
+  `/jckx/` 带 `proxy_redirect` 修正原系统根相对跳转），80 口 ACME 验证；
+  WireGuard 路径不变（JCKX 原报告 `/` 仍仅内网）
 
 ## 5. 生产环境要点
 
@@ -91,7 +93,7 @@ execution_replay / minute_bar / train_experiment`
   JCKX_REPORT_BASE_URL` 等，完整见 `.env.example`
 - 共享只读 JCKX 缓存：`/home/ubuntu/jckx-tail-overnight/cache`（事件 pickle，
   带版本校验）；`data/minute_history` 只有指数分钟，无个股分钟
-- nginx：`0.0.0.0:443`（公网 `/strategy/`）、`0.0.0.0:80`（ACME+跳转）、
+- nginx：`0.0.0.0:443`（公网 `/strategy/` + `/jckx/`）、`0.0.0.0:80`（ACME+跳转）、
   WireGuard `10.66.0.1:80`（JCKX 8081 + strategy 8082）；ufw 放行 22/80/443/51820
 - 云安全组：22、80、443、51820/udp 已放行
 - auth_server：`127.0.0.1:8082`，`logs/auth_server.pid` + 每 5 分钟看门狗

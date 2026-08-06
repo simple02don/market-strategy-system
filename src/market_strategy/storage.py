@@ -915,6 +915,26 @@ class Storage:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def pending_replays(self, max_data_date: str) -> list[dict]:
+        """待回放的正式候选：目标日已到期且尚未写入 execution_replay（可跨天重试）。"""
+        rows = self._conn.execute(
+            """
+            SELECT id, trade_date, entity, payload FROM prediction_log
+            WHERE category='candidate'
+              AND is_formal=1
+              AND trade_date <= ?
+              AND id IN (
+                SELECT MAX(id) FROM prediction_log
+                WHERE category='candidate' AND is_formal=1
+                GROUP BY trade_date, entity
+              )
+              AND id NOT IN (SELECT prediction_id FROM execution_replay)
+            ORDER BY id
+            """,
+            (max_data_date,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def upsert_outcome(self, row: dict) -> None:
         self._conn.execute(
             """

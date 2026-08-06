@@ -113,3 +113,38 @@ def test_train_experiment_roundtrip(tmp_path):
     assert '"num_leaves": 63' in row["config"]
     assert '"approved": true' in row["component_status"]
     storage.close()
+
+
+def test_pending_replays_excludes_already_replayed(tmp_path):
+    storage = Storage(tmp_path / "replay.db")
+    run_id = storage.start_run("nightly", "20260806")
+    common = {
+        "run_id": run_id,
+        "trade_date": "20260806",
+        "decision_time": "2026-08-05 23:01:00",
+        "information_cutoff": "2026-08-05 23:00:00",
+        "dataset_version": "live-test",
+        "model_version": "rule_v1",
+        "category": "candidate",
+        "is_formal": True,
+    }
+    storage.save_prediction(**common, entity="600001.SH", payload={"score": 80})
+    storage.save_prediction(**common, entity="600002.SH", payload={"score": 79})
+    rows = storage._conn.execute(
+        "SELECT id, entity FROM prediction_log ORDER BY id"
+    ).fetchall()
+    storage.save_execution_replay(
+        {
+            "prediction_id": rows[0]["id"],
+            "trade_date": "20260806",
+            "ts_code": rows[0]["entity"],
+            "verdict": "filled",
+            "entry_price": 10.0,
+            "exit_price": 10.5,
+            "reason": "开盘15分钟站稳分时均线",
+            "source": "tushare",
+        }
+    )
+    pending = storage.pending_replays("20260806")
+    assert [row["entity"] for row in pending] == ["600002.SH"]
+    storage.close()
