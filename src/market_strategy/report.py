@@ -67,6 +67,15 @@ def generate_report(payload: dict[str, Any], output: Path) -> Path:
         f"目标板块：{_esc('、'.join(target_sectors) or '防守 / 无明确目标')}</p>"
         f"<p>{_esc(intent_forecast.get('reason', ''))}</p></div>"
     )
+    last_signals = (
+        (intent_sequence[-1].get("trap_signals") or []) if intent_sequence else []
+    )
+    trap_card = (
+        "<div class='card'><h2>最近交易日的恶意证据（收割信号）</h2>"
+        f"<ul>{''.join(f'<li>{_esc(s)}</li>' for s in last_signals) or '<li>无</li>'}</ul></div>"
+        if last_signals
+        else ""
+    )
     sector_rows = "".join(
         f"<tr><td>{_esc(s.get('industry'))}</td><td>{_esc(s.get('role'))}</td>"
         f"<td>{_esc(s.get('score'))}</td><td>{_esc(s.get('today_pct'))}%</td>"
@@ -167,6 +176,7 @@ th{{color:#8fa0bd;font-weight:500}}
 <p>主导：<b>{_esc(state.get('label'))}</b>（{_esc(state.get('model_version'))}）</p>
 <table><tr><th>状态</th><th>概率</th></tr>{state_rows}</table></div>
 	{forecast_card}
+	{trap_card}
 <div class="card"><h2>市场宽度</h2>
 <p>上涨 {_esc(breadth.get('up'))} / 下跌 {_esc(breadth.get('down'))} · 涨停 {_esc(breadth.get('limit_up'))} / 跌停 {_esc(breadth.get('limit_down'))}
 · 60日新高 {_esc(breadth.get('new_high_60d'))} / 新低 {_esc(breadth.get('new_low_60d'))}</p></div>

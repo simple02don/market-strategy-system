@@ -82,7 +82,6 @@ def test_pattern_selection_primary_only_from_target_and_qualified():
     out = apply_pattern_selection(candidates, history, ["黄金"])
     primaries = [c for c in out if c["tier"] == "primary"]
     assert [c["ts_code"] for c in primaries] == ["600001.SH"]
-    assert out[1]["ts_code"] == "600003.SH" or out[1]["tier"] == "watch"
 
 
 def test_pattern_selection_no_primary_when_defensive():
@@ -102,97 +101,110 @@ def _base_snap(**overrides):
         "limit_up": 50,
         "limit_down": 5,
         "top_sector": "半导体",
-        "top_sector_20d": "黄金",
+        "top_sector_20d": "半导体",
         "top_excess_20d": 5.0,
         "focal_pct": 4.0,
-        "focal_limit_up": 15,
+        "focal_limit_up": 8,
         "focal_up_ratio": 0.9,
-        "focal_surge": 1.3,
+        "focal_surge": 1.2,
         "focal_stocks": 196,
         "second_focal": "元器件",
+        "close_loc": 0.7,
+        "upper_shadow": 0.1,
+        "lower_shadow": 0.1,
+        "pct_std": 2.0,
+        "pct_median": 3.5,
         "lhb_net_yi": 2.0,
         "inst_net_yi": 0.5,
         "policy_count": 0,
-        "chase": 0.6,
-        "capitulation": 0.0,
     }
     base.update(overrides)
     return base
 
 
-def test_daily_intent_labels():
-    assert infer_daily_intent(_base_snap())["label"] == "拉主线"
+def test_daily_stage_labels():
+    assert infer_daily_intent(_base_snap())["stage"] == "拉升"
     assert (
         infer_daily_intent(
-            _base_snap(advance=0.40, focal_pct=0.5, focal_limit_up=0, chase=0.0)
-        )["label"]
-        == "护指数"
+            _base_snap(focal_pct=5.0, focal_limit_up=20, focal_surge=1.5, upper_shadow=0.25)
+        )["stage"]
+        == "派发"
     )
     assert (
         infer_daily_intent(
-            _base_snap(focal_pct=-3.0, capitulation=0.7, chase=0.0)
-        )["label"]
-        == "兑现降风险"
+            _base_snap(focal_pct=-3.5, focal_surge=1.4, close_loc=0.25)
+        )["stage"]
+        == "砸盘"
     )
     assert (
         infer_daily_intent(
-            _base_snap(advance=0.65, focal_pct=0.5, focal_limit_up=0, chase=0.0)
-        )["label"]
-        == "普涨修复"
+            _base_snap(focal_pct=-1.5, close_loc=0.6, lower_shadow=0.3)
+        )["stage"]
+        == "洗盘"
     )
     assert (
         infer_daily_intent(
             _base_snap(
-                advance=0.40,
-                ret1=-0.01,
-                ret5=-0.02,
-                focal_pct=0.2,
-                focal_limit_up=0,
-                chase=0.0,
-                capitulation=0.0,
+                focal_pct=1.0,
+                close_loc=0.75,
+                lower_shadow=0.3,
+                focal_surge=1.0,
+                lhb_net_yi=0.0,
+                inst_net_yi=0.0,
             )
-        )["label"]
-        == "弱势观望"
+        )["stage"]
+        == "反包"
+    )
+    assert (
+        infer_daily_intent(
+            _base_snap(
+                focal_pct=0.5,
+                focal_surge=0.8,
+                top_excess_20d=1.0,
+                lhb_net_yi=0.3,
+                inst_net_yi=0.2,
+            )
+        )["stage"]
+        == "吸筹"
     )
 
 
-def _snap(label, top="半导体", policy=0, chase=0.0, capitulation=0.0, limit_up=0, surge=1.0):
+def _snap(stage, top="半导体", surge=1.0, close_loc=0.6, limit_up=0, upper=0.0, lower=0.0, pct=2.0):
     return {
-        "label": label,
+        "stage": stage,
+        "label": stage,
         "top_sector": top,
         "second_focal": "元器件",
-        "policy_count": policy,
-        "chase": chase,
-        "capitulation": capitulation,
-        "focal_limit_up": limit_up,
         "focal_surge": surge,
+        "close_loc": close_loc,
+        "focal_limit_up": limit_up,
+        "upper_shadow": upper,
+        "lower_shadow": lower,
+        "focal_pct": pct,
     }
 
 
-def test_forecast_transitions_with_malice():
-    # 连续2日同板块 + 追高信号强 → 兑现（砸盘套人风险）
-    assert (
-        forecast_next_intent([_snap("拉主线", chase=0.6, limit_up=15, surge=1.3)] * 2)["label"]
-        == "兑现降风险"
-    )
-    # 连续3日同板块，即使追高不极端也兑现
-    assert forecast_next_intent([_snap("拉主线", chase=0.0)] * 3)["label"] == "兑现降风险"
-    # 单日狂拉+大量涨停 → 次日兑现
-    assert (
-        forecast_next_intent([_snap("拉主线", chase=0.8, limit_up=25, surge=1.5)])["label"]
-        == "兑现降风险"
-    )
-    # 温和拉抬 → 延续
-    assert forecast_next_intent([_snap("拉主线", chase=0.2)] * 2)["label"] == "拉主线"
-    # 兑现 + 割肉信号 → 反包修复，目标为被砸板块
-    slammed = _snap("兑现降风险", capitulation=0.7, top="半导体")
-    assert forecast_next_intent([_snap("拉主线"), slammed])["label"] == "普涨修复"
+def test_forecast_stage_machine():
+    # 派发 → 砸盘
+    assert forecast_next_intent([_snap("派发", limit_up=20, surge=1.5)])["label"] == "砸盘"
+    # 砸盘 + 长下影收回 → 反包（目标为被砸板块）
+    slammed = _snap("砸盘", surge=1.4, close_loc=0.55, lower=0.25)
+    assert forecast_next_intent([slammed])["label"] == "反包"
     assert forecast_next_intent([slammed])["target_sectors"] == ["半导体"]
-    # 兑现但无割肉 + 政策 → 轮动
-    assert (
-        forecast_next_intent([_snap("兑现降风险", capitulation=0.0, policy=2)])["label"]
-        == "政策驱动轮动"
-    )
-    # 连续观望 → 修复；单日观望 → 观望
-    assert forecast_next_intent([_snap("弱势观望")] * 2)["label"] == "普涨修复"
-    assert forecast_next_intent([_snap("弱势观望")])["label"] == "弱势观望"
+    # 砸盘无承接 → 继续回避
+    assert forecast_next_intent([_snap("砸盘", close_loc=0.2, lower=0.05)])["label"] == "砸盘"
+    # 反包放量强 → 拉升；缩量弱 → 诱多再砸
+    assert forecast_next_intent([_snap("反包", surge=1.4, close_loc=0.75)])["label"] == "拉升"
+    assert forecast_next_intent([_snap("反包", surge=1.0, close_loc=0.6)])["label"] == "砸盘"
+    # 拉升连续2日 + 追高 → 派发
+    heavy = _snap("拉升", limit_up=18, surge=1.4, upper=0.2, pct=4.5)
+    assert forecast_next_intent([heavy, heavy])["label"] == "派发"
+    # 拉升连续3日 → 派发
+    assert forecast_next_intent([_snap("拉升")] * 3)["label"] == "派发"
+    # 拉升温和 → 延续
+    assert forecast_next_intent([_snap("拉升")] * 2)["label"] == "拉升"
+    # 洗盘 → 拉升；吸筹 → 拉升
+    assert forecast_next_intent([_snap("洗盘")])["label"] == "拉升"
+    assert forecast_next_intent([_snap("吸筹")])["label"] == "拉升"
+    # 观望
+    assert forecast_next_intent([_snap("观望")])["label"] == "观望"

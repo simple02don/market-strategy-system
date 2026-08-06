@@ -554,8 +554,10 @@ class NightlyPipeline:
                 {
                     "trade_date": item["trade_date"],
                     "label": item["label"],
+                    "stage": item.get("stage", item["label"]),
                     "strength": item["strength"],
                     "top_sector": item.get("top_sector", ""),
+                    "trap_signals": item.get("trap_signals", []),
                     "reasons": item.get("reasons", []),
                 }
                 for item in intent_sequence
