@@ -126,6 +126,97 @@ ROUTE_BONUS = {
 }
 
 
+def defensive_universe(
+    bars: pd.DataFrame,
+    stocks: list[tuple],
+    industries: set[str],
+    trade_date: str,
+    *,
+    mode: str = "haven",
+    min_rows: int = 30,
+) -> list[dict]:
+    """为防守模式按“结构健康度”选候选，而不是按动量。
+
+    - haven（避风港）：站上 MA20、未过热（ret15≤15、ret5≤12）、MA20 不崩；
+    - rebound（反包猎手）：未深破位（收盘≥MA20*0.95、MA20 斜率≥-8%），
+      且今日出现止跌特征（收阳或长下影）。
+    """
+    if not industries:
+        return []
+    stock_df = pd.DataFrame(stocks, columns=["ts_code", "name", "industry", "list_date"])
+    stock_df = stock_df[stock_df["industry"].isin(industries)]
+    out: list[dict] = []
+    for row in stock_df.itertuples(index=False):
+        code = str(row.ts_code)
+        frame = bars[bars["ts_code"] == code].sort_values("trade_date")
+        if len(frame) < min_rows:
+            continue
+        close = frame["close"].astype(float)
+        pct = frame["pct_chg"].astype(float)
+        ma20 = float(close.rolling(20).mean().iloc[-1])
+        ma20_prev5 = float(close.rolling(20).mean().iloc[-6]) if len(frame) >= 21 else ma20
+        ma20_slope = (ma20 / ma20_prev5 - 1.0) * 100.0 if ma20_prev5 > 0 else 0.0
+        price = float(close.iloc[-1])
+        ret5 = float(pct.iloc[-5:].sum())
+        ret15 = float(pct.iloc[-15:].sum())
+        today = frame.iloc[-1]
+        day_range = float(today["high"]) - float(today["low"])
+        close_loc = (
+            (float(today["close"]) - float(today["low"])) / day_range
+            if day_range > 0
+            else 0.5
+        )
+        lower = (
+            (min(float(today["open"]), float(today["close"])) - float(today["low"])) / day_range
+            if day_range > 0
+            else 0.0
+        )
+        today_pct = float(today["pct_chg"] or 0.0)
+        above_ma20 = price > ma20
+        if mode == "haven":
+            eligible = bool(
+                above_ma20 and ret15 <= 15.0 and ret5 <= 12.0 and ma20_slope >= -3.0
+            )
+        else:
+            eligible = bool(
+                price >= ma20 * 0.95
+                and ma20_slope >= -8.0
+                and (today_pct > 0 or lower >= 0.12)
+            )
+        if not eligible:
+            continue
+        route, detail = classify_stock_route(frame)
+        exhaustion = bool(detail.get("exhaustion", False))
+        score = round(
+            50.0
+            + close_loc * 20.0
+            + (0.0 if exhaustion else 10.0)
+            + ROUTE_BONUS[route] * 0.5,
+            2,
+        )
+        out.append(
+            {
+                "ts_code": code,
+                "name": str(row.name),
+                "industry": str(row.industry),
+                "score": score,
+                "route": route,
+                "pattern": detail,
+                "role": "防御候选",
+                "evidence_score": 0.0,
+                "close_loc": round(close_loc, 3),
+                "lower_shadow": round(lower, 3),
+                "today_pct": round(today_pct, 3),
+                "ret5": round(ret5, 2),
+                "ret15": round(ret15, 2),
+                "ma20_slope": round(ma20_slope, 2),
+                "tier": "risk_control",
+                "confirm_conditions": "触发条件见操作建议；不满足不买入",
+            }
+        )
+    return out
+
+
 def defensive_selection(
     candidates: list[dict],
     stock_history: dict[str, pd.DataFrame],

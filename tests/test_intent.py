@@ -8,6 +8,7 @@ from market_strategy.models.stock_pattern import (
     apply_pattern_selection,
     classify_stock_route,
     defensive_selection,
+    defensive_universe,
 )
 from market_strategy.models.intent import STAGE_PLAYBOOK
 
@@ -131,6 +132,49 @@ def test_defensive_selection_haven_rotation():
     assert [c["ts_code"] for c in haven] == ["600004.SH"]
     assert haven[0]["position"] == "≤15%"
     assert all(c["tier"] != "haven" for c in out if c["industry"] == "黄金")
+
+
+def test_defensive_universe_haven_filters_hot_stocks():
+    stocks = [
+        ("600100.SH", "安静股", "元器件", "20200101"),
+        ("600200.SH", "热股", "元器件", "20200101"),
+    ]
+    quiet = _frame([10.0 + index * 0.02 for index in range(60)])
+    quiet["ts_code"] = "600100.SH"
+    hot = _frame([10.0] * 30 + [10.0 + index * 0.4 for index in range(6)])
+    hot["ts_code"] = "600200.SH"
+    bars = pd.concat([quiet, hot], ignore_index=True)
+    out = defensive_universe(bars, stocks, {"元器件"}, "d059", mode="haven")
+    codes = [c["ts_code"] for c in out]
+    assert "600100.SH" in codes
+    assert "600200.SH" not in codes
+
+
+def test_defensive_universe_rebound_requires_structure():
+    stocks = [
+        ("600300.SH", "反包股", "黄金", "20200101"),
+        ("600400.SH", "破位股", "黄金", "20200101"),
+    ]
+    rebound_closes = [10.0 + index * 0.03 for index in range(50)]
+    rebound_closes = rebound_closes[:-1] + [10.9]
+    rebound = _frame(rebound_closes)
+    rebound.loc[rebound.index[-1], ["open", "high", "low", "close", "pct_chg"]] = [
+        11.47,
+        11.5,
+        10.3,
+        10.9,
+        (10.9 / 11.47 - 1.0) * 100.0,
+    ]
+    rebound["ts_code"] = "600300.SH"
+    broken_closes = [10.0 + index * 0.03 for index in range(50)]
+    broken_closes = broken_closes[:-1] + [9.6]
+    broken = _frame(broken_closes)
+    broken["ts_code"] = "600400.SH"
+    bars = pd.concat([rebound, broken], ignore_index=True)
+    out = defensive_universe(bars, stocks, {"黄金"}, "d059", mode="rebound")
+    codes = [c["ts_code"] for c in out]
+    assert "600300.SH" in codes
+    assert "600400.SH" not in codes
 
 
 def test_stage_playbook_covers_all_stages():

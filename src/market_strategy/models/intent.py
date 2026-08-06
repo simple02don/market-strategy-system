@@ -100,7 +100,13 @@ def _focal_sectors(
         pct = group["pct_chg"].astype(float)
         today_pct = float(pct.mean())
         up_ratio = float((pct > 0).mean())
-        limit_up = int((pct >= 9.6).sum())
+        symbol = group["ts_code"].astype(str).str.split(".").str[0]
+        limits = np.where(
+            symbol.str.startswith(("688", "689", "30")),
+            19.8,
+            np.where(symbol.str.startswith(("8", "4", "920")), 29.8, 9.8),
+        )
+        limit_up = int((pct.to_numpy() >= limits - 0.2).sum())
         amount_today = float(group["amount"].astype(float).sum())
         surge = 0.0
         if industry in hist_amount.index.get_level_values(0):

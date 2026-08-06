@@ -22,7 +22,11 @@ from .features.market import market_context
 from .models import build_scenarios, classify_market_state, rank_sectors, rank_stocks
 from .models.intent import STAGE_PLAYBOOK, forecast_next_intent, infer_intent_sequence
 from .models.operator import infer_operator_playbook
-from .models.stock_pattern import apply_pattern_selection, defensive_selection
+from .models.stock_pattern import (
+    apply_pattern_selection,
+    defensive_selection,
+    defensive_universe,
+)
 from .models.inference import (
     component_approved,
     infer_market,
@@ -498,7 +502,7 @@ class NightlyPipeline:
             if lhb.get("available"):
                 recent_hot = {
                     str(item.get("top_sector", ""))
-                    for item in intent_sequence[-2:]
+                    for item in intent_sequence[-3:]
                 }
                 haven_sectors = {
                     str(item.get("industry", ""))
@@ -509,20 +513,18 @@ class NightlyPipeline:
             if rebound_sector:
                 extra_industries.add(rebound_sector)
             if extra_industries:
-                subset_stocks = [s for s in stocks if s[2] in extra_industries]
-                if subset_stocks:
-                    extra_candidates = rank_stocks(
-                        bars,
-                        basics,
-                        subset_stocks,
-                        latest_str,
-                        industry_excess=industry_excess,
-                        stock_evidence=evidence.get("stock_scores") or {},
-                    )
-                    existing_codes = {candidate.get("ts_code") for candidate in candidates}
-                    candidates.extend(
-                        c for c in extra_candidates if c["ts_code"] not in existing_codes
-                    )
+                haven_extra = defensive_universe(
+                    bars, stocks, haven_sectors, latest_str, mode="haven"
+                )
+                rebound_extra = defensive_universe(
+                    bars, stocks, {rebound_sector}, latest_str, mode="rebound"
+                )
+                existing_codes = {candidate.get("ts_code") for candidate in candidates}
+                candidates.extend(
+                    c
+                    for c in [*haven_extra, *rebound_extra]
+                    if c["ts_code"] not in existing_codes
+                )
             candidates = defensive_selection(
                 candidates,
                 stock_history,
@@ -545,7 +547,7 @@ class NightlyPipeline:
             "forecast_stage": forecast_stage,
             "forecast": STAGE_PLAYBOOK.get(forecast_stage, {}),
         }
-        model_version_effective = f"{model_version_effective}+intent_v1"
+        model_version_effective = f"{model_version_effective}+intent_v3"
         latest_dt = datetime.strptime(latest_str, "%Y%m%d")
         next_dt = datetime.strptime(next_day_str, "%Y%m%d")
         data_ok = (
