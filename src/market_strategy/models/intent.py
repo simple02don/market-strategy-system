@@ -309,7 +309,7 @@ def forecast_next_intent(sequence: list[dict[str, Any]]) -> dict[str, Any]:
     def same_sector_run() -> int:
         count = 0
         for item in reversed(sequence):
-            if item["stage"] in {"拉升", "派发"} and item.get("top_sector") == top:
+            if item["stage"] in {"拉升", "拉升高潮", "派发"} and item.get("top_sector") == top:
                 count += 1
             else:
                 break
@@ -326,6 +326,17 @@ def forecast_next_intent(sequence: list[dict[str, Any]]) -> dict[str, Any]:
             ),
         }
     if stage == "拉升高潮":
+        run = same_sector_run()
+        if run >= 2:
+            return {
+                "label": "派发",
+                "confidence": 0.65,
+                "target_sectors": [],
+                "reason": (
+                    f"{top}连续{run}日情绪高潮（涨停{limit_up}家/量能{surge:.2f}x），"
+                    "追高盘越积越多，派发窗口临近"
+                ),
+            }
         return {
             "label": "派发",
             "confidence": 0.55,
