@@ -257,7 +257,9 @@ def defensive_selection(
     for cand in out:
         score = float(cand.get("score", 0.0))
         industry = str(cand.get("industry") or "")
-        qualified = cand["route"] != "not_confirmed"
+        # 结构池（defensive_universe）候选自带 ma20_slope，已通过健康度筛选；
+        # 动量池候选仍要求三形态合格。
+        qualified = cand["route"] != "not_confirmed" or "ma20_slope" in cand
         if (
             rebound_sector
             and industry == rebound_sector

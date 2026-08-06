@@ -177,6 +177,25 @@ def test_defensive_universe_rebound_requires_structure():
     assert "600400.SH" not in codes
 
 
+def test_defensive_structure_candidates_skip_route_requirement():
+    candidates = [
+        {
+            "ts_code": "600100.SH",
+            "name": "安静股",
+            "industry": "元器件",
+            "score": 60.0,
+            "route": "not_confirmed",
+            "pattern": {},
+            "ma20_slope": 1.0,
+            "evidence_score": 0.0,
+            "tier": "risk_control",
+            "confirm_conditions": "",
+        }
+    ]
+    out = defensive_selection(candidates, {}, haven_sectors={"元器件"})
+    assert out[0]["tier"] == "haven"
+
+
 def test_stage_playbook_covers_all_stages():
     for stage in ("吸筹", "洗盘", "拉升", "拉升高潮", "派发", "砸盘", "反包", "观望"):
         entry = STAGE_PLAYBOOK[stage]
