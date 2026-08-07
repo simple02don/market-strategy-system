@@ -8,12 +8,12 @@
 
 | 项 | 状态 |
 |---|---|
-| 代码 | GitHub main 基线 `8078d63`；生产 git HEAD `93efcfe` 与基线业务代码一致（仅交接文档不同） |
-| 测试 | 修复分支 81 个全过（生产 Python 3.12 venv、独立临时目录，不读写生产数据库） |
+| 代码 | GitHub PR #1 已合并（业务合并提交 `ff0fa16`）；生产部署提交 `eafdbcf`，业务文件与 GitHub 合并内容一致 |
+| 测试 | 81 个全过（隔离目录与生产目录各一次，Python 3.12）；compileall 通过 |
 | 生产 | `/home/ubuntu/market-strategy-system`（ubuntu 运行，`.env` 600）；`ssh jckx-prod`（root@43.136.54.243，密钥 `~/.ssh/jckx_prod_ed25519`） |
-| 数据 | SQLite `data/market_strategy.sqlite3`，最新行情日 20260806（8/7 数据要到当晚 18:00 后） |
+| 数据 | SQLite `data/market_strategy.sqlite3`，最新行情日 20260807；部署前在线备份位于 `/home/ubuntu/market-strategy-deploy-backups/pre-e22553b/` |
 | 模型 | `models/artifacts/v1`、`v2`（gitignored）；组件未批准 → 线上走规则基线 |
-| 推送 | 最近一次正式推送：run 35（8/10 报告，8/6 数据，防守模式，WeCom ok）；**周日 23:00 会用 8/7 数据再推一次 8/10 报告（正式版）** |
+| 推送 | 最近正式推送仍为 run 35；部署验收 run 36 使用 8/7 数据生成 8/10 干跑报告，`normal`、无正式记录、未推送；周日 23:00 按日历生成正式版 |
 | 报告访问 | 公网 HTTPS：市场策略 `/strategy/`、JCKX 原报告 `/jckx/`（均登录，会话 10 年）；WireGuard 内网路径不变 |
 | 证书 | Let's Encrypt 短效 IP 证书，每 6 小时自动续期并 reload nginx |
 
@@ -146,11 +146,15 @@ ssh jckx-prod 'runuser -u ubuntu -- sh -c "cd ... && tar -xzf /tmp/mss.tar.gz \
 ## 9. 建议技能（给接手 Agent）
 
 - `diagnosing-bugs`：运行异常先走诊断循环
-- `tdd`：改代码测试先行（仓库已有 60 个回归测试）
+- `tdd`：改代码测试先行（仓库已有 81 个回归测试）
 - `self-improvement`：意外失败或纠正时记录教训
 - `handoff`：再次交接时重新生成本文件
 
 ## 10. 近期提交（改动依据）
+
+`507cfb4` 统一硬过滤/收益与分钟回放正确性；`e22553b` 防守资金广度、结构资格、
+机器可读执行计划与报告目标日语义；GitHub PR #1 合并提交 `ff0fa16`；生产部署提交
+`eafdbcf`。其余历史依据：
 
 `9edb19c` 防守候选形态保留；`e8f1810` 支撑压力+near-miss；`c11dcac`/`389b2dc`/
 `5155f13`/`55b8f47`/`17ea830`/`86b2a0f` 防守机会与避风港；`a7c4cae`/`60f4f34`/
