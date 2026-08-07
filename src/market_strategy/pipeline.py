@@ -26,6 +26,7 @@ from .models.stock_pattern import (
     apply_pattern_selection,
     defensive_selection,
     defensive_universe,
+    merge_defensive_candidates,
 )
 from .models.inference import (
     component_approved,
@@ -281,6 +282,9 @@ class NightlyPipeline:
                     "dataset_version": dataset_version,
                     "model_version": model_version,
                     "code_commit": _git_commit(),
+                    "run_mode": (
+                        "dry_run" if dry_run or not push else "formal_pending"
+                    ),
                 }
             )
             payload = _json_safe(payload)
@@ -302,6 +306,13 @@ class NightlyPipeline:
                     self._wecom_summary(payload)
                 )
             payload["push_result"] = push_result
+            payload["run_mode"] = (
+                "dry_run"
+                if dry_run or not push
+                else ("formal" if push_result.get("ok") else "push_failed")
+            )
+            # 推送结果决定是否形成正式预测；覆盖同一路径，让链接中的报告语义与落库一致。
+            generate_report(payload, report_path)
             self._save_predictions(
                 run_id,
                 payload,
@@ -405,6 +416,24 @@ class NightlyPipeline:
         stocks = self.storage.listed_records()
         industry_map = {code: industry for code, _name, industry, _list_date in stocks}
         evidence["lhb"] = build_lhb_summary(self.storage, latest_str, industry_map)
+        index_daily_df = pd.read_sql_query(
+            """
+            SELECT trade_date, close FROM index_daily
+            WHERE ts_code='000001.SH' AND trade_date <= ?
+            """,
+            self.storage._conn,
+            params=(latest_str,),
+        )
+        intent_sequence = infer_intent_sequence(
+            bars,
+            index_daily_df,
+            industry_map,
+            self.storage,
+            end_date=latest_str,
+            days=5,
+        )
+        intent_forecast = forecast_next_intent(intent_sequence)
+        target_sectors = list(intent_forecast.get("target_sectors") or [])
         sectors = rank_sectors(
             bars,
             latest_str,
@@ -425,6 +454,7 @@ class NightlyPipeline:
             latest_str,
             industry_excess=industry_excess,
             stock_evidence=evidence.get("stock_scores") or {},
+            target_industries=set(target_sectors),
         )
         model_version_effective = "rule_v1"
         models = load_models()
@@ -462,24 +492,6 @@ class NightlyPipeline:
             if stock_last and component_approved(models, "stock"):
                 candidates = infer_stocks(models, stock_last, candidates, evidence=evidence)
                 model_version_effective = f"lgbm_v{(models.get('meta') or {}).get('version', 0)}"
-        index_daily_df = pd.read_sql_query(
-            """
-            SELECT trade_date, close FROM index_daily
-            WHERE ts_code='000001.SH' AND trade_date <= ?
-            """,
-            self.storage._conn,
-            params=(latest_str,),
-        )
-        intent_sequence = infer_intent_sequence(
-            bars,
-            index_daily_df,
-            industry_map,
-            self.storage,
-            end_date=latest_str,
-            days=5,
-        )
-        intent_forecast = forecast_next_intent(intent_sequence)
-        target_sectors = list(intent_forecast.get("target_sectors") or [])
         candidate_codes = {candidate.get("ts_code", "") for candidate in candidates}
         stock_history = {
             code: group
@@ -498,32 +510,55 @@ class NightlyPipeline:
                         rebound_sector = item.get("top_sector", "")
                     break
             haven_sectors: set[str] = set()
+            haven_sector_evidence: dict[str, dict[str, Any]] = {}
+            haven_stock_flow: dict[str, float] = {}
             lhb = evidence.get("lhb") or {}
             if lhb.get("available"):
                 recent_hot = {
                     str(item.get("top_sector", ""))
                     for item in intent_sequence[-3:]
                 }
-                haven_sectors = {
-                    str(item.get("industry", ""))
-                    for item in (lhb.get("top_inflows") or [])[:3]
-                    if str(item.get("industry", "")) not in recent_hot
+                for item in (lhb.get("top_inflows") or [])[:3]:
+                    industry = str(item.get("industry", ""))
+                    if (
+                        industry
+                        and industry not in recent_hot
+                        and float(item.get("net_amount_yi", 0.0) or 0.0)
+                        >= config.env_float("HAVEN_MIN_SECTOR_LHB_NET_YI", 1.0)
+                        and int(item.get("positive_count", 0) or 0)
+                        >= config.env_int("HAVEN_MIN_SECTOR_LHB_POSITIVE_STOCKS", 2)
+                        and float(item.get("positive_share", 0.0) or 0.0)
+                        >= config.env_float("HAVEN_MIN_SECTOR_LHB_POSITIVE_SHARE", 0.60)
+                    ):
+                        haven_sectors.add(industry)
+                        haven_sector_evidence[industry] = item
+                haven_stock_flow = {
+                    str(item.get("ts_code", "")): float(
+                        item.get("net_amount_yi", 0.0) or 0.0
+                    )
+                    for item in (lhb.get("stock_flows") or [])
+                    if item.get("ts_code")
                 }
             extra_industries = set(haven_sectors)
             if rebound_sector:
                 extra_industries.add(rebound_sector)
             if extra_industries:
                 haven_extra = defensive_universe(
-                    bars, stocks, haven_sectors, latest_str, mode="haven"
+                    bars,
+                    basics,
+                    stocks,
+                    haven_sectors,
+                    latest_str,
+                    mode="haven",
+                    sector_evidence=haven_sector_evidence,
+                    stock_flow_yi=haven_stock_flow,
                 )
                 rebound_extra = defensive_universe(
-                    bars, stocks, {rebound_sector}, latest_str, mode="rebound"
+                    bars, basics, stocks, {rebound_sector}, latest_str, mode="rebound"
                 )
-                existing_codes = {candidate.get("ts_code") for candidate in candidates}
-                candidates.extend(
-                    c
-                    for c in [*haven_extra, *rebound_extra]
-                    if c["ts_code"] not in existing_codes
+                candidates = merge_defensive_candidates(
+                    candidates,
+                    [*haven_extra, *rebound_extra],
                 )
             candidate_codes = {candidate.get("ts_code", "") for candidate in candidates}
             stock_history = {
@@ -536,12 +571,17 @@ class NightlyPipeline:
                 rebound_sector=rebound_sector,
                 repair_mode=repair_mode,
                 haven_sectors=haven_sectors,
+                risk_control_max=config.env_int("RISK_CONTROL_MAX", 3),
             )
         else:
             candidates = apply_pattern_selection(
                 candidates,
                 stock_history,
                 target_sectors,
+                primary_max=config.env_int("PRIMARY_MAX", 3),
+                primary_max_same_industry=config.env_int("PRIMARY_MAX_SAME_INDUSTRY", 2),
+                watch_max=config.env_int("WATCH_MAX", 5),
+                risk_control_max=config.env_int("RISK_CONTROL_MAX", 3),
                 min_primary_score=config.env_float("PRIMARY_RULE_MIN_SCORE", 75.0),
             )
         last_stage = intent_sequence[-1]["stage"] if intent_sequence else "观望"
@@ -812,8 +852,15 @@ class NightlyPipeline:
             ) or "无主推荐"
         else:
             pick_text = "无合格候选（合法空仓）"
+        mode_label = {
+            "dry_run": "干跑",
+            "formal_pending": "正式推送中",
+            "formal": "正式",
+            "push_failed": "推送失败",
+        }.get(str(payload.get("run_mode") or ""), "未知")
         return (
-            f"## 主力策略情景推演 · 次日{payload.get('next_trade_date')}\n"
+            f"## 主力策略情景推演 · 目标日{payload.get('next_trade_date')}\n"
+            f"> 数据截止：{payload.get('trade_date')} · 运行：{mode_label}\n"
             f"> 市场状态：{state.get('label')}\n"
             f"> 次日情景：{scenario_text}\n"
             f"> 强势板块：{sector_text}\n"

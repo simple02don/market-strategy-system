@@ -9,6 +9,7 @@ from market_strategy.models.stock_pattern import (
     classify_stock_route,
     defensive_selection,
     defensive_universe,
+    merge_defensive_candidates,
     route_near_miss,
 )
 from market_strategy.models.intent import STAGE_PLAYBOOK
@@ -44,6 +45,28 @@ def _near_frame():
         + [10.25, 10.35, 10.5]
     )
     return _frame(closes)
+
+
+def _dated(frame, end="20260805"):
+    result = frame.copy()
+    result["trade_date"] = pd.date_range(
+        end=pd.Timestamp(end), periods=len(result), freq="D"
+    ).strftime("%Y%m%d")
+    return result
+
+
+def _basics(*codes):
+    return pd.DataFrame(
+        [
+            {
+                "ts_code": code,
+                "pe_ttm": 20.0,
+                "circ_mv": 2_000_000.0,
+                "turnover_rate": 2.0,
+            }
+            for code in codes
+        ]
+    )
 
 
 def test_route_just_started():
@@ -130,11 +153,23 @@ def test_defensive_selection_rebound_and_repair():
     assert "600002.SH" in [c["ts_code"] for c in repair]
     assert all(c["trigger"] for c in rebound + repair)
     assert all(c["stop"] and c["position"] for c in rebound + repair)
+    assert rebound[0]["execution_plan"]["type"] == "rebound_vwap15"
+    assert repair[0]["execution_plan"]["type"] == "repair_vwap15"
 
 
 def test_defensive_selection_haven_rotation():
     candidates = [
-        {"ts_code": "600004.SH", "name": "D", "industry": "水运", "score": 72.0, "tier": "watch", "evidence_score": 0.0},
+        {
+            "ts_code": "600004.SH",
+            "name": "D",
+            "industry": "水运",
+            "score": 72.0,
+            "tier": "watch",
+            "evidence_score": 0.0,
+            "defensive_qualified": True,
+            "defensive_mode": "haven",
+            "ma20": 10.2,
+        },
         {"ts_code": "600005.SH", "name": "E", "industry": "黄金", "score": 90.0, "tier": "primary", "evidence_score": 0.0},
     ]
     launch_closes = [10.0] * 30 + [10.2, 10.4, 10.6, 10.8, 11.0, 11.3]
@@ -146,6 +181,8 @@ def test_defensive_selection_haven_rotation():
     haven = [c for c in out if c["tier"] == "haven"]
     assert [c["ts_code"] for c in haven] == ["600004.SH"]
     assert haven[0]["position"] == "≤15%"
+    assert haven[0]["execution_plan"]["type"] == "haven_vwap15_ma20"
+    assert haven[0]["execution_plan"]["min_price"] > 0
     assert all(c["tier"] != "haven" for c in out if c["industry"] == "黄金")
 
 
@@ -154,15 +191,91 @@ def test_defensive_universe_haven_filters_hot_stocks():
         ("600100.SH", "安静股", "元器件", "20200101"),
         ("600200.SH", "热股", "元器件", "20200101"),
     ]
-    quiet = _frame([10.0 + index * 0.02 for index in range(60)])
+    quiet = _dated(_frame([10.0 + index * 0.02 for index in range(60)]))
     quiet["ts_code"] = "600100.SH"
-    hot = _frame([10.0] * 30 + [10.0 + index * 0.4 for index in range(6)])
+    hot = _dated(_frame([10.0] * 30 + [10.0 + index * 0.4 for index in range(6)]))
     hot["ts_code"] = "600200.SH"
     bars = pd.concat([quiet, hot], ignore_index=True)
-    out = defensive_universe(bars, stocks, {"元器件"}, "d059", mode="haven")
+    out = defensive_universe(
+        bars,
+        _basics("600100.SH", "600200.SH"),
+        stocks,
+        {"元器件"},
+        "20260805",
+        mode="haven",
+    )
     codes = [c["ts_code"] for c in out]
     assert "600100.SH" in codes
     assert "600200.SH" not in codes
+
+
+def test_defensive_universe_haven_requires_broad_net_sector_inflow():
+    stocks = [("600100.SH", "安静股", "元器件", "20200101")]
+    quiet = _dated(_frame([10.0 + index * 0.02 for index in range(60)]))
+    quiet["ts_code"] = "600100.SH"
+    basics = _basics("600100.SH")
+    weak = defensive_universe(
+        quiet,
+        basics,
+        stocks,
+        {"元器件"},
+        "20260805",
+        mode="haven",
+        sector_evidence={
+            "元器件": {
+                "net_amount_yi": 3.0,
+                "positive_count": 1,
+                "positive_share": 1.0,
+            }
+        },
+    )
+    assert weak == []
+    broad = defensive_universe(
+        quiet,
+        basics,
+        stocks,
+        {"元器件"},
+        "20260805",
+        mode="haven",
+        sector_evidence={
+            "元器件": {
+                "net_amount_yi": 3.0,
+                "positive_count": 3,
+                "positive_share": 0.75,
+            }
+        },
+        stock_flow_yi={"600100.SH": 0.5},
+    )
+    assert [item["ts_code"] for item in broad] == ["600100.SH"]
+    assert broad[0]["defensive_qualified"] is True
+    assert broad[0]["quality"]["sector"] > 60
+    selected = defensive_selection(broad, {}, haven_sectors={"元器件"})
+    assert selected[0]["score"] == broad[0]["score"]
+
+
+def test_structural_candidate_replaces_duplicate_normal_candidate():
+    normal = [
+        {
+            "ts_code": "600100.SH",
+            "score": 90.0,
+            "evidence_score": 0.7,
+            "tier": "watch",
+        }
+    ]
+    structural = [
+        {
+            "ts_code": "600100.SH",
+            "score": 65.0,
+            "defensive_qualified": True,
+            "defensive_mode": "haven",
+            "evidence_score": 0.0,
+        }
+    ]
+    merged = merge_defensive_candidates(normal, structural)
+    assert len(merged) == 1
+    assert merged[0]["score"] == 65.0
+    assert merged[0]["defensive_qualified"] is True
+    assert merged[0]["evidence_score"] == 0.7
 
 
 def test_defensive_universe_rebound_requires_structure():
@@ -171,28 +284,64 @@ def test_defensive_universe_rebound_requires_structure():
         ("600400.SH", "破位股", "黄金", "20200101"),
     ]
     rebound_closes = [10.0 + index * 0.03 for index in range(50)]
-    rebound_closes = rebound_closes[:-1] + [10.9]
-    rebound = _frame(rebound_closes)
+    rebound_closes = rebound_closes[:-1] + [11.0]
+    rebound = _dated(_frame(rebound_closes))
     rebound.loc[rebound.index[-1], ["open", "high", "low", "close", "pct_chg"]] = [
         11.47,
         11.5,
         10.3,
-        10.9,
-        (10.9 / 11.47 - 1.0) * 100.0,
+        11.0,
+        (11.0 / 11.47 - 1.0) * 100.0,
     ]
     rebound["ts_code"] = "600300.SH"
     broken_closes = [10.0 + index * 0.03 for index in range(50)]
     broken_closes = broken_closes[:-1] + [9.6]
-    broken = _frame(broken_closes)
+    broken = _dated(_frame(broken_closes))
     broken["ts_code"] = "600400.SH"
     bars = pd.concat([rebound, broken], ignore_index=True)
-    out = defensive_universe(bars, stocks, {"黄金"}, "d059", mode="rebound")
+    out = defensive_universe(
+        bars,
+        _basics("600300.SH", "600400.SH"),
+        stocks,
+        {"黄金"},
+        "20260805",
+        mode="rebound",
+    )
     codes = [c["ts_code"] for c in out]
     assert "600300.SH" in codes
     assert "600400.SH" not in codes
 
 
-def test_defensive_structure_candidates_skip_route_requirement():
+def test_defensive_universe_cannot_bypass_common_hard_filters():
+    codes = ["600501.SH", "600502.SH", "600503.SH", "600504.SH", "600505.SH"]
+    stocks = [
+        (codes[0], "合格股", "黄金", "20200101"),
+        (codes[1], "*ST风险", "黄金", "20200101"),
+        (codes[2], "小市值", "黄金", "20200101"),
+        (codes[3], "新股", "黄金", "20260801"),
+        (codes[4], "低流动性", "黄金", "20200101"),
+    ]
+    frames = []
+    for code in codes:
+        frame = _dated(_frame([10.0 + index * 0.02 for index in range(60)]))
+        frame["ts_code"] = code
+        if code == codes[4]:
+            frame["amount"] = 10.0
+        frames.append(frame)
+    basics = _basics(*codes)
+    basics.loc[basics["ts_code"] == codes[2], "circ_mv"] = 500_000.0
+    out = defensive_universe(
+        pd.concat(frames, ignore_index=True),
+        basics,
+        stocks,
+        {"黄金"},
+        "20260805",
+        mode="haven",
+    )
+    assert [item["ts_code"] for item in out] == [codes[0]]
+
+
+def test_explicitly_qualified_defensive_structure_can_skip_route_requirement():
     candidates = [
         {
             "ts_code": "600100.SH",
@@ -202,6 +351,9 @@ def test_defensive_structure_candidates_skip_route_requirement():
             "route": "not_confirmed",
             "pattern": {},
             "ma20_slope": 1.0,
+            "ma20": 9.8,
+            "defensive_qualified": True,
+            "defensive_mode": "haven",
             "evidence_score": 0.0,
             "tier": "risk_control",
             "confirm_conditions": "",
@@ -209,6 +361,52 @@ def test_defensive_structure_candidates_skip_route_requirement():
     ]
     out = defensive_selection(candidates, {}, haven_sectors={"元器件"})
     assert out[0]["tier"] == "haven"
+
+
+def test_field_presence_alone_cannot_bypass_route_requirement():
+    candidates = [
+        {
+            "ts_code": "600101.SH",
+            "name": "未验资格股",
+            "industry": "元器件",
+            "score": 60.0,
+            "route": "not_confirmed",
+            "pattern": {},
+            "ma20_slope": 1.0,
+            "ma20": 9.8,
+            "evidence_score": 0.0,
+            "tier": "risk_control",
+            "confirm_conditions": "",
+        }
+    ]
+    out = defensive_selection(candidates, {}, haven_sectors={"元器件"})
+    assert out[0]["tier"] == "watch"
+    assert out[0]["execution_plan"]["type"] == "observe_only"
+
+
+def test_normal_route_candidate_cannot_bypass_haven_evidence_gate():
+    launch_closes = [10.0] * 30 + [10.2, 10.4, 10.6, 10.8, 11.0, 11.3]
+    launch = _frame(
+        launch_closes,
+        [1000.0] * (len(launch_closes) - 1) + [2000.0],
+    )
+    candidates = [
+        {
+            "ts_code": "600102.SH",
+            "name": "普通形态股",
+            "industry": "元器件",
+            "score": 72.0,
+            "tier": "watch",
+            "evidence_score": 0.0,
+        }
+    ]
+    out = defensive_selection(
+        candidates,
+        {"600102.SH": launch},
+        haven_sectors={"元器件"},
+    )
+    assert out[0]["route"] == "just_started"
+    assert out[0]["tier"] == "watch"
 
 
 def test_route_near_miss_flags_rising_seed_and_blocks_exhaustion():
@@ -362,6 +560,24 @@ def test_daily_stage_labels():
         )["stage"]
         == "吸筹"
     )
+
+
+def test_no_stage_signal_fails_closed_to_wait():
+    result = infer_daily_intent(
+        _base_snap(
+            focal_pct=1.2,
+            focal_surge=1.2,
+            close_loc=0.4,
+            upper_shadow=0.1,
+            lower_shadow=0.1,
+            pct_std=1.0,
+            lhb_net_yi=0.0,
+            inst_net_yi=0.0,
+        )
+    )
+    assert result["stage"] == "观望"
+    assert result["probabilities"]["观望"] == 1.0
+    assert forecast_next_intent([result])["label"] == "观望"
 
 
 def _snap(stage, top="半导体", surge=1.0, close_loc=0.6, limit_up=0, upper=0.0, lower=0.0, pct=2.0):

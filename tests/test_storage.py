@@ -1,5 +1,6 @@
 from market_strategy.storage import Storage
 import json
+import sqlite3
 
 
 def test_upsert_trade_cal(tmp_path):
@@ -11,6 +12,36 @@ def test_upsert_trade_cal(tmp_path):
     assert storage.upsert_trade_cal(rows) == 2
     assert storage.upsert_trade_cal(rows) == 0
     assert storage.get_trade_cal("20260804") is True
+    storage.close()
+
+
+def test_existing_replay_table_migrates_plan_type_column(tmp_path):
+    db_path = tmp_path / "old-schema.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE execution_replay (
+          prediction_id INTEGER PRIMARY KEY,
+          trade_date TEXT NOT NULL,
+          ts_code TEXT NOT NULL,
+          verdict TEXT NOT NULL,
+          high_open_pct REAL,
+          vwap_15m REAL,
+          close_15m REAL,
+          entry_price REAL,
+          exit_price REAL,
+          reason TEXT,
+          source TEXT,
+          created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.close()
+    storage = Storage(db_path)
+    columns = {
+        row[1] for row in storage._conn.execute("PRAGMA table_info(execution_replay)")
+    }
+    assert "plan_type" in columns
     storage.close()
 
 
@@ -48,8 +79,12 @@ def test_prediction_json_is_finite_and_only_formal_predictions_track(tmp_path):
         "category": "candidate",
         "entity": "600000.SH",
     }
-    storage.save_prediction(**common, payload={"score": float("nan")}, is_formal=False)
-    storage.save_prediction(**common, payload={"score": 66.0}, is_formal=True)
+    storage.save_prediction(
+        **common, payload={"tier": "primary", "score": float("nan")}, is_formal=False
+    )
+    storage.save_prediction(
+        **common, payload={"tier": "primary", "score": 66.0}, is_formal=True
+    )
     rows = storage._conn.execute(
         "SELECT payload, is_formal FROM prediction_log ORDER BY id"
     ).fetchall()
@@ -128,8 +163,18 @@ def test_pending_replays_excludes_already_replayed(tmp_path):
         "category": "candidate",
         "is_formal": True,
     }
-    storage.save_prediction(**common, entity="600001.SH", payload={"score": 80})
-    storage.save_prediction(**common, entity="600002.SH", payload={"score": 79})
+    storage.save_prediction(
+        **common, entity="600001.SH", payload={"tier": "primary", "score": 80}
+    )
+    storage.save_prediction(
+        **common, entity="600002.SH", payload={"tier": "haven", "score": 79}
+    )
+    storage.save_prediction(
+        **common, entity="600003.SH", payload={"tier": "repair", "score": 78}
+    )
+    storage.save_prediction(
+        **common, entity="600004.SH", payload={"tier": "watch", "score": 90}
+    )
     rows = storage._conn.execute(
         "SELECT id, entity FROM prediction_log ORDER BY id"
     ).fetchall()
@@ -145,6 +190,77 @@ def test_pending_replays_excludes_already_replayed(tmp_path):
             "source": "tushare",
         }
     )
+    storage.save_execution_replay(
+        {
+            "prediction_id": rows[1]["id"],
+            "trade_date": "20260806",
+            "ts_code": rows[1]["entity"],
+            "verdict": "no_data",
+            "reason": "分钟数据不足15根，无法确认",
+            "source": "",
+        }
+    )
     pending = storage.pending_replays("20260806")
-    assert [row["entity"] for row in pending] == ["600002.SH"]
+    assert [row["entity"] for row in pending] == ["600002.SH", "600003.SH"]
+    assert "600004.SH" not in [row["entity"] for row in storage.pending_outcomes("20260806")]
+    storage.close()
+
+
+def test_outcome_summary_excludes_legacy_open_proxy_measurements(tmp_path):
+    storage = Storage(tmp_path / "summary.db")
+    base = {
+        "ts_code": "600001.SH",
+        "trade_date": "20260806",
+        "tier": "primary",
+        "score": 80.0,
+        "industry_ret_next": 0.0,
+        "market_ret_next": 0.0,
+    }
+    storage.upsert_outcome(
+        {
+            **base,
+            "prediction_id": 1,
+            "ret_next": 20.0,
+            "excess": 20.0,
+            "measurement": "open_to_close_proxy",
+        }
+    )
+    storage.upsert_outcome(
+        {
+            **base,
+            "prediction_id": 2,
+            "ret_next": 1.0,
+            "excess": 0.6,
+            "measurement": "trigger_entry_to_close_after_cost",
+        }
+    )
+    summary = storage.outcome_summary()
+    assert summary["n"] == 1
+    assert summary["legacy_excluded"] == 1
+    assert summary["mean_excess"] == 0.6
+    storage.close()
+
+
+def test_source_document_archive_is_upserted(tmp_path):
+    storage = Storage(tmp_path / "documents.db")
+    storage.upsert_source_document(
+        {
+            "document_id": "doc-1",
+            "source": "govcn_policy",
+            "url": "https://example.test/policy",
+            "publish_time": "2026-08-06 10:00:00",
+            "content_hash": "abc",
+            "content": "政策正文快照",
+            "fetch_status": "ok",
+        }
+    )
+    assert storage.source_document_ids(["doc-1", "missing"]) == {"doc-1"}
+    row = storage._conn.execute(
+        "SELECT source, content, fetch_status FROM source_document WHERE document_id='doc-1'"
+    ).fetchone()
+    assert dict(row) == {
+        "source": "govcn_policy",
+        "content": "政策正文快照",
+        "fetch_status": "ok",
+    }
     storage.close()

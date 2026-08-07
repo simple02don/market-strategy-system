@@ -2,11 +2,57 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from .. import config
 from ..providers.minute_source import fetch_minute_bars
 from ..storage import Storage
+
+
+def _execution_plan(prediction: dict[str, Any]) -> dict[str, Any]:
+    payload = prediction.get("payload") or {}
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (TypeError, ValueError):
+            payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    plan = payload.get("execution_plan") or {}
+    if isinstance(plan, dict) and plan.get("type"):
+        return plan
+    # 兼容修复前已冻结、但尚未带 execution_plan 的正式预测。
+    # 能从 tier 无歧义恢复的规则继续回放；无法恢复的关键基准不得猜测。
+    base = {
+        "version": 0,
+        "type": "standard_vwap15",
+        "max_open_gap_pct": 0.03,
+        "cancel_open_gap_pct": 0.05,
+        "cancel_below_prev_low": True,
+        "require_close15_above_vwap": True,
+    }
+    tier = str(payload.get("tier") or "")
+    if tier == "rebound":
+        return {
+            **base,
+            "type": "rebound_vwap15",
+            "require_close15_above_open": True,
+        }
+    if tier == "repair":
+        return {
+            **base,
+            "type": "repair_vwap15",
+            "min_lower_shadow_ratio": 0.20,
+        }
+    if tier == "haven":
+        pattern = payload.get("pattern") or {}
+        return {
+            **base,
+            "type": "haven_vwap15_ma20",
+            "min_price": payload.get("ma20") or pattern.get("ma20"),
+        }
+    return base
 
 
 def replay_candidate(
@@ -19,6 +65,8 @@ def replay_candidate(
     prediction_id = int(prediction.get("id") or 0)
     trade_date = str(prediction.get("trade_date") or "")
     ts_code = str(prediction.get("entity") or "")
+    plan = _execution_plan(prediction)
+    plan_type = str(plan.get("type") or "standard_vwap15")
     base = {
         "prediction_id": prediction_id,
         "trade_date": trade_date,
@@ -30,17 +78,20 @@ def replay_candidate(
         "exit_price": None,
         "source": "",
         "reason": "",
+        "plan_type": plan_type,
     }
+    if plan_type == "observe_only":
+        return {**base, "verdict": "canceled", "reason": "观察/回避层级不执行"}
     if not minute_rows or pre_close <= 0:
         return {**base, "verdict": "no_data", "reason": "minute_data_unavailable"}
 
     open_price = float(minute_rows[0].get("open") or minute_rows[0].get("close") or 0.0)
     high_open_pct = open_price / pre_close - 1.0 if pre_close else 0.0
     window = minute_rows[:15]
-    if len(window) < 5:
+    if len(window) < 15:
         return {
             **base,
-            "verdict": "not_filled",
+            "verdict": "no_data",
             "high_open_pct": round(high_open_pct, 4),
             "exit_price": float(minute_rows[-1].get("close") or 0.0),
             "reason": "分钟数据不足15根，无法确认",
@@ -53,29 +104,51 @@ def replay_candidate(
         else sum(float(row.get("close") or 0.0) for row in window) / len(window)
     )
     close_15 = float(window[-1].get("close") or 0.0)
+    high_15 = max(float(row.get("high") or row.get("close") or 0.0) for row in window)
+    low_15 = min(float(row.get("low") or row.get("close") or 0.0) for row in window)
+    range_15 = high_15 - low_15
+    lower_shadow_ratio = (
+        (min(open_price, close_15) - low_15) / range_15 if range_15 > 0 else 0.0
+    )
     exit_price = float(minute_rows[-1].get("close") or 0.0)
     common = {
         **base,
         "high_open_pct": round(high_open_pct, 4),
         "vwap_15m": round(vwap, 4),
         "close_15m": round(close_15, 4),
+        "low_15m": round(low_15, 4),
+        "lower_shadow_ratio_15m": round(lower_shadow_ratio, 4),
         "exit_price": round(exit_price, 4),
         "source": str(minute_rows[0].get("source", "")),
     }
-    if high_open_pct > 0.05:
+    cancel_open_gap = float(plan.get("cancel_open_gap_pct", 0.05) or 0.05)
+    max_open_gap = float(plan.get("max_open_gap_pct", 0.03) or 0.03)
+    if high_open_pct > cancel_open_gap:
         return {**common, "verdict": "canceled", "reason": "高开>5%放弃"}
-    if high_open_pct < 0 and open_price < prev_low:
+    if plan.get("cancel_below_prev_low", True) and high_open_pct < 0 and open_price < prev_low:
         return {**common, "verdict": "canceled", "reason": "低开破前日低点放弃"}
-    if high_open_pct > 0.03:
+    if high_open_pct > max_open_gap:
         return {**common, "verdict": "not_filled", "reason": "高开3%-5%未达确认条件"}
-    if close_15 >= vwap:
-        return {
-            **common,
-            "verdict": "filled",
-            "entry_price": round(open_price, 4),
-            "reason": "开盘15分钟站稳分时均线",
-        }
-    return {**common, "verdict": "not_filled", "reason": "开盘15分钟未站稳分时均线"}
+    min_price = plan.get("min_price")
+    if plan_type == "haven_vwap15_ma20":
+        if min_price is None or float(min_price) <= 0:
+            return {**common, "verdict": "canceled", "reason": "避风港计划缺少MA20基准"}
+        if low_15 < float(min_price):
+            return {**common, "verdict": "not_filled", "reason": "前15分钟跌破前日MA20"}
+    if plan.get("require_close15_above_open") and close_15 <= open_price:
+        return {**common, "verdict": "not_filled", "reason": "前15分钟未形成反包阳线"}
+    min_lower_shadow = float(plan.get("min_lower_shadow_ratio", 0.0) or 0.0)
+    if lower_shadow_ratio < min_lower_shadow:
+        return {**common, "verdict": "not_filled", "reason": "前15分钟下影承接不足"}
+    if plan.get("require_close15_above_vwap", True) and close_15 < vwap:
+        return {**common, "verdict": "not_filled", "reason": "开盘15分钟未站稳分时均线"}
+    return {
+        **common,
+        "verdict": "filled",
+        # 确认发生在第15根分钟线收盘后，成交价不能回看成开盘价。
+        "entry_price": round(close_15, 4),
+        "reason": f"{plan_type}全部确认条件满足",
+    }
 
 
 def run_replay(

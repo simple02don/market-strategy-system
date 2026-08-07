@@ -40,6 +40,11 @@ def _resolve_latest_data_day(now: datetime, latest_trading_day) -> date | None:
     return latest_trading_day(data_day)
 
 
+def _resolve_target_data_day(target_day: date, latest_trading_day) -> date | None:
+    """显式目标日只能使用目标日前已经完成的行情，防止历史回放读到未来。"""
+    return latest_trading_day(target_day - timedelta(days=1))
+
+
 def cmd_check_calendar(args) -> int:
     with Storage() as storage:
         provider = TushareProvider()
@@ -85,7 +90,7 @@ def cmd_nightly(args) -> int:
         today = now.date()
         if args.trade_date:
             next_day = datetime.strptime(args.trade_date, "%Y%m%d").date()
-            latest = _resolve_latest_data_day(now, pipe.calendar.latest_trading_day)
+            latest = _resolve_target_data_day(next_day, pipe.calendar.latest_trading_day)
             if latest is None:
                 print(json.dumps({"status": "failed", "error": "no_latest_trade_day"}))
                 return 1
@@ -123,7 +128,7 @@ def cmd_train(args) -> int:
     with Storage() as storage:
         result = train_all(storage, args.trade_date or now_cst().date().strftime("%Y%m%d"))
         print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0
+    return 1 if result.get("status") == "failed" else 0
 
 
 def cmd_train_log(args) -> int:

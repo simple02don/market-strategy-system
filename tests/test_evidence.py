@@ -220,6 +220,41 @@ def test_lhb_summary_groups_by_industry(tmp_path):
     assert summary["top_inflows"][0]["net_amount_yi"] == 3.0
     assert summary["top_outflows"][0]["industry"] == "水运"
     assert round(summary["inst_net_buy_total_yi"], 2) == 0.8
+    assert all(item["inst_net_buy_yi"] > 0 for item in summary["inst_top_inflows"])
+    storage.close()
+
+
+def test_lhb_summary_nets_opposite_flows_within_same_industry(tmp_path):
+    storage = Storage(tmp_path / "lhb-net.db")
+    storage.upsert_lhb_daily(
+        [
+            {
+                "trade_date": "20260805",
+                "ts_code": "600001.SH",
+                "name": "行业买方",
+                "net_amount": 3e8,
+            },
+            {
+                "trade_date": "20260805",
+                "ts_code": "600002.SH",
+                "name": "行业卖方",
+                "net_amount": -2e8,
+            },
+        ],
+        "test",
+    )
+    summary = build_lhb_summary(
+        storage,
+        "20260805",
+        {"600001.SH": "元器件", "600002.SH": "元器件"},
+    )
+    inflow = summary["top_inflows"][0]
+    assert inflow["industry"] == "元器件"
+    assert inflow["net_amount_yi"] == 1.0
+    assert inflow["positive_count"] == 1
+    assert inflow["negative_count"] == 1
+    assert inflow["positive_share"] == 0.5
+    assert {item["net_amount_yi"] for item in summary["stock_flows"]} == {3.0, -2.0}
     storage.close()
 
 

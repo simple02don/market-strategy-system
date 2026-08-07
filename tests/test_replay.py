@@ -1,4 +1,5 @@
 from market_strategy.execution.replay import replay_candidate
+from market_strategy.outcomes import track_outcomes
 from market_strategy.providers.minute_source import _parse_eastmoney_trends
 from market_strategy.storage import Storage
 
@@ -21,8 +22,14 @@ def _minutes(open_price, closes):
     ]
 
 
-def _prediction(prediction_id=1, trade_date="20260806", entity="600489.SH"):
-    return {"id": prediction_id, "trade_date": trade_date, "entity": entity, "payload": {}}
+def _prediction(
+    prediction_id=1,
+    trade_date="20260806",
+    entity="600489.SH",
+    execution_plan=None,
+):
+    payload = {"execution_plan": execution_plan} if execution_plan else {}
+    return {"id": prediction_id, "trade_date": trade_date, "entity": entity, "payload": payload}
 
 
 def test_replay_filled_when_open_moderate_and_close_above_vwap():
@@ -34,7 +41,7 @@ def test_replay_filled_when_open_moderate_and_close_above_vwap():
         prev_low=21.5,
     )
     assert result["verdict"] == "filled"
-    assert result["entry_price"] == 22.20
+    assert result["entry_price"] == closes[-1]
     assert result["high_open_pct"] == round(22.20 / 22.0 - 1, 4)
 
 
@@ -91,8 +98,115 @@ def test_replay_no_data_and_insufficient_rows():
         pre_close=22.0,
         prev_low=21.5,
     )
-    assert short["verdict"] == "not_filled"
+    assert short["verdict"] == "no_data"
     assert "不足" in short["reason"]
+
+
+def test_replay_requires_all_15_confirmation_bars():
+    result = replay_candidate(
+        _prediction(),
+        _minutes(22.2, [22.2] * 14),
+        pre_close=22.0,
+        prev_low=21.5,
+    )
+    assert result["verdict"] == "no_data"
+
+
+def test_haven_replay_requires_first_15m_to_hold_ma20():
+    plan = {
+        "version": 1,
+        "type": "haven_vwap15_ma20",
+        "max_open_gap_pct": 0.03,
+        "cancel_open_gap_pct": 0.05,
+        "cancel_below_prev_low": True,
+        "require_close15_above_vwap": True,
+        "min_price": 10.0,
+    }
+    rows = _minutes(10.05, [10.05 + i * 0.01 for i in range(15)])
+    filled = replay_candidate(
+        _prediction(execution_plan=plan), rows, pre_close=10.0, prev_low=9.7
+    )
+    assert filled["verdict"] == "filled"
+    assert filled["plan_type"] == "haven_vwap15_ma20"
+    rows[3]["low"] = 9.95
+    rejected = replay_candidate(
+        _prediction(execution_plan=plan), rows, pre_close=10.0, prev_low=9.7
+    )
+    assert rejected["verdict"] == "not_filled"
+    assert "MA20" in rejected["reason"]
+
+
+def test_rebound_replay_requires_15m_bullish_close():
+    plan = {
+        "version": 1,
+        "type": "rebound_vwap15",
+        "require_close15_above_vwap": True,
+        "require_close15_above_open": True,
+    }
+    falling = replay_candidate(
+        _prediction(execution_plan=plan),
+        _minutes(10.0, [10.0 - i * 0.01 for i in range(15)]),
+        pre_close=10.0,
+        prev_low=9.5,
+    )
+    assert falling["verdict"] == "not_filled"
+    assert "反包阳线" in falling["reason"]
+    rising = replay_candidate(
+        _prediction(execution_plan=plan),
+        _minutes(10.0, [10.0 + i * 0.01 for i in range(15)]),
+        pre_close=10.0,
+        prev_low=9.5,
+    )
+    assert rising["verdict"] == "filled"
+
+
+def test_repair_replay_requires_lower_shadow_support():
+    plan = {
+        "version": 1,
+        "type": "repair_vwap15",
+        "require_close15_above_vwap": True,
+        "min_lower_shadow_ratio": 0.20,
+    }
+    no_shadow = replay_candidate(
+        _prediction(execution_plan=plan),
+        _minutes(10.0, [10.0 + i * 0.01 for i in range(15)]),
+        pre_close=10.0,
+        prev_low=9.5,
+    )
+    assert no_shadow["verdict"] == "not_filled"
+    assert "下影承接" in no_shadow["reason"]
+    supported = replay_candidate(
+        _prediction(execution_plan=plan),
+        _minutes(10.0, [9.9] + [10.01 + i * 0.01 for i in range(14)]),
+        pre_close=10.0,
+        prev_low=9.5,
+    )
+    assert supported["verdict"] == "filled"
+
+
+def test_observe_only_candidate_is_never_replayed_as_a_trade():
+    result = replay_candidate(
+        _prediction(execution_plan={"version": 1, "type": "observe_only"}),
+        _minutes(10.0, [10.0 + i * 0.01 for i in range(15)]),
+        pre_close=10.0,
+        prev_low=9.5,
+    )
+    assert result["verdict"] == "canceled"
+    assert result["entry_price"] is None
+
+
+def test_legacy_haven_without_frozen_ma20_is_not_replayed_as_generic_trade():
+    prediction = _prediction()
+    prediction["payload"] = {"tier": "haven", "pattern": {}}
+    result = replay_candidate(
+        prediction,
+        _minutes(10.0, [10.0 + i * 0.01 for i in range(15)]),
+        pre_close=10.0,
+        prev_low=9.5,
+    )
+    assert result["plan_type"] == "haven_vwap15_ma20"
+    assert result["verdict"] == "canceled"
+    assert "缺少MA20基准" in result["reason"]
 
 
 def test_eastmoney_trends_parser():
@@ -127,12 +241,68 @@ def test_minute_storage_roundtrip(tmp_path):
             "prediction_id": 7, "trade_date": "20260806", "ts_code": "600489.SH",
             "verdict": "filled", "high_open_pct": 0.009, "vwap_15m": 22.3,
             "close_15m": 22.4, "entry_price": 22.2, "exit_price": 23.0,
+            "plan_type": "haven_vwap15_ma20",
             "reason": "开盘15分钟站稳分时均线", "source": "tushare",
         }
     )
     row = storage._conn.execute(
-        "SELECT verdict, entry_price FROM execution_replay WHERE prediction_id=7"
+        "SELECT verdict, entry_price, plan_type FROM execution_replay WHERE prediction_id=7"
     ).fetchone()
     assert row["verdict"] == "filled"
     assert row["entry_price"] == 22.2
+    assert row["plan_type"] == "haven_vwap15_ma20"
+    storage.close()
+
+
+def test_outcome_uses_confirmed_entry_instead_of_open_proxy(tmp_path):
+    storage = Storage(tmp_path / "outcome.db")
+    storage.upsert_stock_basic(
+        [
+            {"ts_code": "600489.SH", "name": "候选", "industry": "黄金", "list_date": "20200101"},
+            {"ts_code": "600490.SH", "name": "同业", "industry": "黄金", "list_date": "20200101"},
+        ]
+    )
+    storage.upsert_daily_bars(
+        [
+            {"ts_code": "600489.SH", "trade_date": "20260806", "open": 10.0, "high": 11.2, "low": 9.9, "close": 11.0, "pre_close": 10.0},
+            {"ts_code": "600490.SH", "trade_date": "20260806", "open": 10.0, "high": 10.3, "low": 9.9, "close": 10.2, "pre_close": 10.0},
+        ],
+        "test",
+    )
+    run_id = storage.start_run("nightly", "20260806")
+    storage.save_prediction(
+        run_id=run_id,
+        trade_date="20260806",
+        decision_time="2026-08-05 23:01:00",
+        information_cutoff="2026-08-05 23:00:00",
+        dataset_version="test",
+        model_version="rule_v1",
+        category="candidate",
+        entity="600489.SH",
+        payload={"tier": "primary", "score": 80.0},
+        is_formal=True,
+    )
+    prediction_id = storage._conn.execute(
+        "SELECT id FROM prediction_log WHERE entity='600489.SH'"
+    ).fetchone()["id"]
+    storage.save_execution_replay(
+        {
+            "prediction_id": prediction_id,
+            "trade_date": "20260806",
+            "ts_code": "600489.SH",
+            "verdict": "filled",
+            "entry_price": 10.5,
+            "exit_price": 11.0,
+            "reason": "开盘15分钟站稳分时均线",
+            "source": "tushare",
+        }
+    )
+    result = track_outcomes(storage, "20260806")
+    assert result["tracked"] == 1
+    row = storage._conn.execute(
+        "SELECT ret_next, measurement FROM candidate_outcome WHERE prediction_id=?",
+        (prediction_id,),
+    ).fetchone()
+    assert round(row["ret_next"], 4) == round((11.0 / 10.5 - 1.0) * 100.0, 4)
+    assert row["measurement"] == "trigger_entry_to_close_after_cost"
     storage.close()

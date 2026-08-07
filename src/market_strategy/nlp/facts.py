@@ -75,13 +75,17 @@ def extract_facts(
     model_version: str = "deepseek_fact_v1",
     max_items: int | None = None,
 ) -> dict[str, Any]:
+    if not items:
+        return {"extracted": 0, "skipped": 0, "reason": "no_items"}
     api_key = config.env_str("AI_PRIMARY_API_KEY")
-    if not api_key or not items:
-        return {"extracted": 0, "skipped": len(items), "reason": "no_key_or_items"}
     max_items = max_items or config.env_int("NLP_MAX_ITEMS", 15)
-    client = OpenAI(
-        api_key=api_key,
-        base_url=config.env_str("AI_PRIMARY_BASE_URL", "https://api.deepseek.com"),
+    client = (
+        OpenAI(
+            api_key=api_key,
+            base_url=config.env_str("AI_PRIMARY_BASE_URL", "https://api.deepseek.com"),
+        )
+        if api_key
+        else None
     )
     model = config.env_str("AI_PRIMARY_MODEL", "deepseek-v4-flash")
     high_value = [
@@ -89,21 +93,37 @@ def extract_facts(
         for item in items
         if item.get("tier", 5) <= 1 and item.get("title") and "异常" not in item.get("title", "")
     ][:max_items]
-    existing = storage.fact_document_ids(
-        [str(item.get("source_id") or _hash(item.get("title", ""))) for item in high_value]
-    )
+    high_value_ids = [
+        str(item.get("source_id") or _hash(item.get("title", "")))
+        for item in high_value
+    ]
+    existing = storage.fact_document_ids(high_value_ids)
+    archived = storage.source_document_ids(high_value_ids)
     extracted = 0
     reused = 0
     errors = 0
     for item in high_value:
         document_id = item.get("source_id") or _hash(item.get("title", ""))
-        if str(document_id) in existing:
+        if str(document_id) in existing and str(document_id) in archived:
             reused += 1
             continue
         text = item.get("summary") or ""
         if not text and item.get("url"):
             text = _fetch_text(str(item["url"]))
+        storage.upsert_source_document(
+            {
+                "document_id": document_id,
+                "source": item.get("source", ""),
+                "url": item.get("url", ""),
+                "publish_time": item.get("publish_time", ""),
+                "content_hash": _hash(text) if text else "",
+                "content": text,
+                "fetch_status": "ok" if len(text) >= 60 else "too_short",
+            }
+        )
         if len(text) < 60:
+            continue
+        if client is None:
             continue
         try:
             facts = _llm_extract(text, client, model)
@@ -145,4 +165,5 @@ def extract_facts(
         "document_ids": [
             str(item.get("source_id") or _hash(item.get("title", ""))) for item in high_value
         ],
+        "reason": "no_key" if not api_key else "",
     }
