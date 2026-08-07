@@ -1,6 +1,6 @@
 # A股主力策略情景推演与分层选股系统 · 接手文件
 
-> 最后核验时间：2026-08-07（周五凌晨）
+> 最后核验时间：2026-08-07（周五）
 > 详细规则见 [AGENTS.md](../AGENTS.md)，功能分期见 [REPAIR_PHASES.md](REPAIR_PHASES.md)，
 > 定位与用法见 [README.md](../README.md)。本文件只写键名，不写任何 token/密码。
 
@@ -8,8 +8,8 @@
 
 | 项 | 状态 |
 |---|---|
-| 代码 | 本地 HEAD `9edb19c`（GitHub main 同步）；生产为 tar 部署，生产 git HEAD `93efcfe`（与本地代码一致） |
-| 测试 | 60 个全过（本地 Python 3.10 venv + 生产 Python 3.12 venv） |
+| 代码 | GitHub main 基线 `8078d63`；生产 git HEAD `93efcfe` 与基线业务代码一致（仅交接文档不同） |
+| 测试 | 69 个全过（生产 Python 3.12 venv、独立临时目录，不读写生产数据库） |
 | 生产 | `/home/ubuntu/market-strategy-system`（ubuntu 运行，`.env` 600）；`ssh jckx-prod`（root@43.136.54.243，密钥 `~/.ssh/jckx_prod_ed25519`） |
 | 数据 | SQLite `data/market_strategy.sqlite3`，最新行情日 20260806（8/7 数据要到当晚 18:00 后） |
 | 模型 | `models/artifacts/v1`、`v2`（gitignored）；组件未批准 → 线上走规则基线 |
@@ -54,9 +54,9 @@ cd /home/ubuntu/market-strategy-system
 
 ## 4. 已实现功能（按模块）
 
-- **证据层**：严格 information_cutoff、跨源去重、LLM 有界影响评估、词典兜底、
+- **证据层**：严格 information_cutoff、官方列表日期提取、跨源去重、LLM 有界影响评估、词典兜底、
   行业标签规范化（SECTOR_TERMS + SECTOR_ALIASES + known_industries）、
-  科创板代码排除、evidence_snapshot 存档
+  科创板代码排除、正文快照/source hash、evidence_snapshot 存档
 - **龙虎榜**：top_list/top_inst 入库，按行业聚合，进入操盘假设与防守选股
 - **主力阶段机**（`models/intent.py`）：
   - 每日意图=阶段判定（吸筹/洗盘/拉升/拉升高潮/派发/砸盘/反包/观望），
@@ -71,10 +71,12 @@ cd /home/ubuntu/market-strategy-system
     回踩略超窗口”补位（仅无合格时启用）
   - 防守模式：反包猎手（被砸板块未破位+止跌特征）、超跌修复、
     避风港轮动（低位未过热+资金净流入，≤15%仓位）
-- **训练/实验**：四段切分、每日截面 RankIC、成本后回测、组件批准、
+- **硬过滤**：常规/防守池共用 ST、板块、市值、PE、流动性、上市天数、涨停和过热过滤；
+  目标板块候选在形态筛选前不被全市场榜单截断
+- **训练/实验**：四段切分、每日截面 RankIC、成本后回测、滚动/逐日稳定性门槛、组件批准、
   原子发布+回退、train_experiment 落库、train-log、市场 walk-forward
 - **回放**：Tushare 分钟主源+新浪+东财兜底；15 分钟确认条件回放，
-  pending_replays 独立重试队列
+  完整 15 根确认、确认价成交、no_data 跨天重试；结果跟踪不再使用开盘价代理
 - **报告/推送**：主力意图推演、恶意证据、阶段应对手册、防守机会、
   支撑/压力列；企业微信含预判/防守机会行；公网链接
 
@@ -82,7 +84,7 @@ cd /home/ubuntu/market-strategy-system
 
 - `.env` 键：`TUSHARE_TOKEN / WECOM_WEBHOOK / JCKX_PASSWORD / JCKX_TOKEN /
   AI_PRIMARY_API_KEY / AI_PRIMARY_BASE_URL / AI_PRIMARY_MODEL /
-  SHARED_EVENT_CACHE_DIR / SHARED_MINUTE_HISTORY_DIR / PRIMARY_MAX /
+  SHARED_EVENT_CACHE_DIR / SHARED_EVENT_CACHE_MAX_BYTES / SHARED_MINUTE_HISTORY_DIR / PRIMARY_MAX /
   PRIMARY_MAX_SAME_INDUSTRY / WATCH_MAX / MIN_* / NLP_* / JCKX_REPORT_BASE_URL` 等
 - nginx：`0.0.0.0:443`（`/strategy/` → 8082，`/jckx/` → 8081，均登录+限速；
   `/jckx/` 带 proxy_redirect + sub_filter 修正登录表单）；
@@ -99,7 +101,7 @@ git clone git@github.com:simple02don/market-strategy-system.git
 cd market-strategy-system
 python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
 cp .env.example .env   # 真实值从生产抄：ssh jckx-prod 'cat .../.env'
-PYTHONPATH=src ./venv/bin/python -m pytest tests/ -q   # 期望 60 passed
+PYTHONPATH=src ./venv/bin/python -m pytest tests/ -q   # 期望 69 passed
 ```
 
 注意：macOS Intel 上 lightgbm 需要 libomp（放 `/usr/local/opt/libomp/lib/libomp.dylib`，

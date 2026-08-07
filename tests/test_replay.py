@@ -1,4 +1,5 @@
 from market_strategy.execution.replay import replay_candidate
+from market_strategy.outcomes import track_outcomes
 from market_strategy.providers.minute_source import _parse_eastmoney_trends
 from market_strategy.storage import Storage
 
@@ -34,7 +35,7 @@ def test_replay_filled_when_open_moderate_and_close_above_vwap():
         prev_low=21.5,
     )
     assert result["verdict"] == "filled"
-    assert result["entry_price"] == 22.20
+    assert result["entry_price"] == closes[-1]
     assert result["high_open_pct"] == round(22.20 / 22.0 - 1, 4)
 
 
@@ -91,8 +92,18 @@ def test_replay_no_data_and_insufficient_rows():
         pre_close=22.0,
         prev_low=21.5,
     )
-    assert short["verdict"] == "not_filled"
+    assert short["verdict"] == "no_data"
     assert "不足" in short["reason"]
+
+
+def test_replay_requires_all_15_confirmation_bars():
+    result = replay_candidate(
+        _prediction(),
+        _minutes(22.2, [22.2] * 14),
+        pre_close=22.0,
+        prev_low=21.5,
+    )
+    assert result["verdict"] == "no_data"
 
 
 def test_eastmoney_trends_parser():
@@ -135,4 +146,58 @@ def test_minute_storage_roundtrip(tmp_path):
     ).fetchone()
     assert row["verdict"] == "filled"
     assert row["entry_price"] == 22.2
+    storage.close()
+
+
+def test_outcome_uses_confirmed_entry_instead_of_open_proxy(tmp_path):
+    storage = Storage(tmp_path / "outcome.db")
+    storage.upsert_stock_basic(
+        [
+            {"ts_code": "600489.SH", "name": "候选", "industry": "黄金", "list_date": "20200101"},
+            {"ts_code": "600490.SH", "name": "同业", "industry": "黄金", "list_date": "20200101"},
+        ]
+    )
+    storage.upsert_daily_bars(
+        [
+            {"ts_code": "600489.SH", "trade_date": "20260806", "open": 10.0, "high": 11.2, "low": 9.9, "close": 11.0, "pre_close": 10.0},
+            {"ts_code": "600490.SH", "trade_date": "20260806", "open": 10.0, "high": 10.3, "low": 9.9, "close": 10.2, "pre_close": 10.0},
+        ],
+        "test",
+    )
+    run_id = storage.start_run("nightly", "20260806")
+    storage.save_prediction(
+        run_id=run_id,
+        trade_date="20260806",
+        decision_time="2026-08-05 23:01:00",
+        information_cutoff="2026-08-05 23:00:00",
+        dataset_version="test",
+        model_version="rule_v1",
+        category="candidate",
+        entity="600489.SH",
+        payload={"tier": "primary", "score": 80.0},
+        is_formal=True,
+    )
+    prediction_id = storage._conn.execute(
+        "SELECT id FROM prediction_log WHERE entity='600489.SH'"
+    ).fetchone()["id"]
+    storage.save_execution_replay(
+        {
+            "prediction_id": prediction_id,
+            "trade_date": "20260806",
+            "ts_code": "600489.SH",
+            "verdict": "filled",
+            "entry_price": 10.5,
+            "exit_price": 11.0,
+            "reason": "开盘15分钟站稳分时均线",
+            "source": "tushare",
+        }
+    )
+    result = track_outcomes(storage, "20260806")
+    assert result["tracked"] == 1
+    row = storage._conn.execute(
+        "SELECT ret_next, measurement FROM candidate_outcome WHERE prediction_id=?",
+        (prediction_id,),
+    ).fetchone()
+    assert round(row["ret_next"], 4) == round((11.0 / 10.5 - 1.0) * 100.0, 4)
+    assert row["measurement"] == "trigger_entry_to_close_after_cost"
     storage.close()

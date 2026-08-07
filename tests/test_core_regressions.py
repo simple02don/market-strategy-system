@@ -1,4 +1,6 @@
 import json
+import os
+import pickle
 from datetime import date, datetime, timedelta
 
 import numpy as np
@@ -6,7 +8,11 @@ import pandas as pd
 
 import market_strategy.pipeline as pipeline_module
 from market_strategy.backtest import _portfolio, _split
-from market_strategy.cli import _fallback_data_day, _resolve_latest_data_day
+from market_strategy.cli import (
+    _fallback_data_day,
+    _resolve_latest_data_day,
+    _resolve_target_data_day,
+)
 from market_strategy.features.market import market_context
 from market_strategy.models.inference import infer_stocks
 from market_strategy.models.train import (
@@ -16,6 +22,8 @@ from market_strategy.models.train import (
 )
 from market_strategy.models.stock_rank import rank_stocks
 from market_strategy.providers.index_fallback import _parse_klines
+from market_strategy.providers.news_sources import _extract_publish_time
+from market_strategy.providers.shared_cache import SharedCacheReader
 from market_strategy.pipeline import (
     NightlyPipeline,
     _dataset_data_day,
@@ -23,6 +31,14 @@ from market_strategy.pipeline import (
 )
 from market_strategy.report import generate_report
 from market_strategy.storage import Storage
+
+
+class _PickleExploit:
+    def __init__(self, marker):
+        self.marker = marker
+
+    def __reduce__(self):
+        return (os.system, (f"touch {self.marker}",))
 
 
 def _seed_market(storage, days=80):
@@ -188,6 +204,40 @@ def test_resolve_latest_data_day_is_time_aware():
     assert calls == [date(2026, 8, 5), date(2026, 8, 6)]
 
 
+def test_explicit_target_uses_only_prior_trading_day():
+    requested = []
+
+    def fake_latest(day):
+        requested.append(day)
+        return day
+
+    assert _resolve_target_data_day(date(2026, 8, 10), fake_latest) == date(2026, 8, 9)
+    assert requested == [date(2026, 8, 9)]
+
+
+def test_shared_pickle_cache_rejects_global_code_execution(tmp_path, monkeypatch):
+    cache = tmp_path / "cache"
+    day_dir = cache / "20260805"
+    day_dir.mkdir(parents=True)
+    marker = tmp_path / "pickle-executed"
+    payload = {
+        "schema_version": "v1",
+        "items": [_PickleExploit(marker)],
+        "decision_asof": "2026-08-05T14:50:00",
+    }
+    (day_dir / "event_global_items_bad.pkl").write_bytes(pickle.dumps(payload))
+    monkeypatch.setenv("SHARED_EVENT_CACHE_VERSION", "v1")
+    result = SharedCacheReader(str(cache)).event_items("20260805")
+    assert result["ok"] is False
+    assert not marker.exists()
+
+
+def test_official_list_date_parser_supports_common_formats():
+    assert _extract_publish_time("发布时间：2026年8月7日") == "2026-08-07 00:00:00"
+    assert _extract_publish_time("<span>2026-08-06</span>") == "2026-08-06 00:00:00"
+    assert _extract_publish_time("无日期") == ""
+
+
 def test_dedup_skips_only_when_existing_report_is_as_fresh():
     stale = json.dumps({"dataset_version": "live_20260805_20260806000000"})
     fresh = json.dumps({"dataset_version": "live_20260806_20260806230000"})
@@ -248,6 +298,46 @@ def test_primary_picks_are_industry_diversified(monkeypatch):
     assert primaries[0]["ts_code"] == "600001.SH"
     assert all(c["ts_code"] != "600003.SH" for c in primaries)
     assert any(c["ts_code"] == "600003.SH" and c["tier"] == "watch" for c in out)
+
+
+def test_target_industry_survives_global_rank_truncation():
+    dates = [f"2026080{i}" for i in range(1, 6)]
+    stocks = []
+    rows = []
+    basics = []
+    target_code = "600099.SH"
+    codes = [f"600{i:03d}.SH" for i in range(1, 15)] + [target_code]
+    for index, code in enumerate(codes):
+        industry = "目标" if code == target_code else "高分"
+        stocks.append((code, f"股票{index}", industry, "20200101"))
+        basics.append(
+            {"ts_code": code, "pe_ttm": 20.0, "circ_mv": 200e4, "turnover_rate": 2.0}
+        )
+        daily_pct = -1.0 if code == target_code else 1.0 + index * 0.1
+        for day in dates:
+            rows.append(
+                {
+                    "ts_code": code,
+                    "trade_date": day,
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.8,
+                    "close": 10.2,
+                    "pre_close": 10.0,
+                    "pct_chg": daily_pct,
+                    "vol": 100.0,
+                    "amount": 200000.0,
+                }
+            )
+    out = rank_stocks(
+        pd.DataFrame(rows),
+        pd.DataFrame(basics),
+        stocks,
+        "20260805",
+        industry_excess={"高分": 10.0, "目标": -10.0},
+        target_industries={"目标"},
+    )
+    assert target_code in {item["ts_code"] for item in out}
 
 
 class _FakePredictor:

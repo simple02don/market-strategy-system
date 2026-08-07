@@ -59,7 +59,29 @@ def track_outcomes(storage: Storage, max_data_date: str) -> dict:
             row = rows[rows["ts_code"] == record["entity"]]
             if row.empty:
                 continue
-            ret_next = float(row["execution_return"].iloc[0])
+            execution = storage._conn.execute(
+                """
+                SELECT verdict, entry_price, exit_price
+                FROM execution_replay WHERE prediction_id=?
+                """,
+                (record["id"],),
+            ).fetchone()
+            if not execution or execution["verdict"] == "no_data":
+                # 分钟数据仍可跨天补齐；不以日线开盘价替代尚未确认的成交。
+                continue
+            if execution["verdict"] == "filled":
+                entry = float(execution["entry_price"] or 0.0)
+                exit_price = float(execution["exit_price"] or 0.0)
+                if entry <= 0 or exit_price <= 0:
+                    continue
+                ret_next = (exit_price / entry - 1.0) * 100.0
+                cost_pp = roundtrip_cost_pp
+                measurement = "trigger_entry_to_close_after_cost"
+            else:
+                # 确认条件未触发即保持现金，不虚构一笔开盘成交。
+                ret_next = 0.0
+                cost_pp = 0.0
+                measurement = "trigger_not_executed_cash"
             industry = industry_of(record["entity"])
             industry_ret_next = float(industry_ret.get(industry, market_ret))
             storage.upsert_outcome(
@@ -72,8 +94,8 @@ def track_outcomes(storage: Storage, max_data_date: str) -> dict:
                     "ret_next": ret_next,
                     "industry_ret_next": industry_ret_next,
                     "market_ret_next": market_ret,
-                    "excess": ret_next - industry_ret_next - roundtrip_cost_pp,
-                    "measurement": "next_open_to_close_proxy_after_cost",
+                    "excess": ret_next - industry_ret_next - cost_pp,
+                    "measurement": measurement,
                 }
             )
             tracked += 1

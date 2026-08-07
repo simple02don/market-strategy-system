@@ -313,7 +313,19 @@ def _stage_signals(snap: dict[str, Any]) -> tuple[dict[str, float], list[str]]:
 
 def infer_daily_intent(snap: dict[str, Any]) -> dict[str, Any]:
     scores, signals = _stage_signals(snap)
-    total = sum(scores.values()) or 1.0
+    total = sum(scores.values())
+    if total <= 0 or max(scores.values(), default=0.0) <= 0:
+        probabilities = {stage: 0.0 for stage in scores}
+        probabilities["观望"] = 1.0
+        return {
+            **snap,
+            "label": "观望",
+            "stage": "观望",
+            "strength": 0.0,
+            "probabilities": probabilities,
+            "trap_signals": [],
+            "reasons": ["量价、资金与情绪信号均未达到阶段阈值"],
+        }
     probabilities = {k: round(v / total, 4) for k, v in scores.items()}
     stage = max(scores, key=scores.get)
     return {

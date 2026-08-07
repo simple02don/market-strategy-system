@@ -81,16 +81,25 @@ def _four_way_date_split(frame: pd.DataFrame) -> tuple[pd.DataFrame, ...]:
 
 
 def _daily_rank_ic(frame: pd.DataFrame, pred: np.ndarray, actual_col: str) -> float:
+    values = _daily_rank_ic_values(frame, pred, actual_col)
+    return float(np.mean(list(values.values()))) if values else 0.0
+
+
+def _daily_rank_ic_values(
+    frame: pd.DataFrame,
+    pred: np.ndarray,
+    actual_col: str,
+) -> dict[str, float]:
     scored = frame[["date", actual_col]].copy()
     scored["pred"] = pred
-    values = []
-    for _date, group in scored.groupby("date"):
+    values: dict[str, float] = {}
+    for day, group in scored.groupby("date"):
         if len(group) < 10 or group["pred"].nunique() < 2:
             continue
         value = group["pred"].corr(group[actual_col], method="spearman")
         if pd.notna(value):
-            values.append(float(value))
-    return float(np.mean(values)) if values else 0.0
+            values[str(day)] = float(value)
+    return values
 
 
 def _walkforward_folds(
@@ -121,7 +130,7 @@ def _walkforward_market(
     train_days: int = 120,
     test_days: int = 30,
 ) -> dict:
-    """市场方向模型的滚动样本外检验（仅用于晋级参考，不直接进审批门槛）。"""
+    """市场方向模型的滚动样本外检验，结果直接进入晋级门槛。"""
     frame = frame.dropna(subset=["idx_ret1_next"]).sort_values("date")
     dates = frame["date"].unique()
     results: list[dict] = []
@@ -165,12 +174,28 @@ def _costed_topk_mean(
     top_k: int = 10,
     one_way_cost_bps: float = 20.0,
 ) -> float:
+    values = _costed_topk_values(
+        frame,
+        pred,
+        top_k=top_k,
+        one_way_cost_bps=one_way_cost_bps,
+    )
+    return float(np.mean(list(values.values()))) if values else -999.0
+
+
+def _costed_topk_values(
+    frame: pd.DataFrame,
+    pred: np.ndarray,
+    *,
+    top_k: int = 10,
+    one_way_cost_bps: float = 20.0,
+) -> dict[str, float]:
     scored = frame[["date", "ts_code", "execution_next"]].copy()
     scored["pred"] = pred
     scored = scored.dropna(subset=["execution_next", "pred"])
     previous: dict[str, float] = {}
-    returns = []
-    for _date, group in scored.groupby("date"):
+    returns: dict[str, float] = {}
+    for day, group in scored.groupby("date"):
         picks = group.nlargest(top_k, "pred")
         if picks.empty:
             continue
@@ -182,9 +207,9 @@ def _costed_topk_mean(
         )
         gross = float(picks["execution_next"].mean())
         benchmark = float(group["execution_next"].mean())
-        returns.append(gross - benchmark - turnover * one_way_cost_bps / 100.0)
+        returns[str(day)] = gross - benchmark - turnover * one_way_cost_bps / 100.0
         previous = current
-    return float(np.mean(returns)) if returns else -999.0
+    return returns
 
 
 def _git_commit() -> str:
@@ -336,6 +361,20 @@ def _train_all_impl(storage: Storage, trade_date: str, started: str) -> dict:
         "excess1_next",
     )
     sector_baseline_ic = _daily_rank_ic(sec_val, sec_val["ret20"].values, "excess1_next")
+    sector_daily_ic = _daily_rank_ic_values(sec_val, sector_pred_val, "excess1_next")
+    sector_baseline_daily_ic = _daily_rank_ic_values(
+        sec_val, sec_val["ret20"].values, "excess1_next"
+    )
+    sector_compare_days = sorted(set(sector_daily_ic) & set(sector_baseline_daily_ic))
+    sector_positive_rate = float(
+        np.mean([sector_daily_ic[day] > 0 for day in sector_compare_days])
+    ) if sector_compare_days else 0.0
+    sector_win_rate = float(
+        np.mean([
+            sector_daily_ic[day] > sector_baseline_daily_ic[day]
+            for day in sector_compare_days
+        ])
+    ) if sector_compare_days else 0.0
 
     # ---- 个股 LightGBM + 校准 ----
     stock = stock.dropna(subset=["residual_next"])
@@ -352,6 +391,18 @@ def _train_all_impl(storage: Storage, trade_date: str, started: str) -> dict:
     stock_baseline_ic = _daily_rank_ic(stk_val, stk_val["ret5"].values, "residual_next")
     stock_costed_excess = _costed_topk_mean(stk_val, stock_pred_val)
     stock_baseline_costed_excess = _costed_topk_mean(stk_val, stk_val["ret5"].values)
+    stock_costed_daily = _costed_topk_values(stk_val, stock_pred_val)
+    stock_baseline_costed_daily = _costed_topk_values(stk_val, stk_val["ret5"].values)
+    stock_compare_days = sorted(set(stock_costed_daily) & set(stock_baseline_costed_daily))
+    stock_costed_positive_rate = float(
+        np.mean([stock_costed_daily[day] > 0 for day in stock_compare_days])
+    ) if stock_compare_days else 0.0
+    stock_costed_win_rate = float(
+        np.mean([
+            stock_costed_daily[day] > stock_baseline_costed_daily[day]
+            for day in stock_compare_days
+        ])
+    ) if stock_compare_days else 0.0
     stock_calibrator = IsotonicRegression(out_of_bounds="clip")
     stock_pred_cal = stock_lgbm.predict(stk_cal[STOCK_FEATURES].fillna(0.0))
     stock_calibrator.fit(stock_pred_cal, (stk_cal["residual_next"] > 0).astype(int).values)
@@ -363,10 +414,16 @@ def _train_all_impl(storage: Storage, trade_date: str, started: str) -> dict:
         "market_accuracy": round(market_acc, 4),
         "sector_daily_rank_ic": round(sector_ic, 4),
         "sector_baseline_daily_rank_ic": round(sector_baseline_ic, 4),
+        "sector_validation_days": len(sector_compare_days),
+        "sector_positive_ic_rate": round(sector_positive_rate, 4),
+        "sector_baseline_win_rate": round(sector_win_rate, 4),
         "stock_daily_rank_ic": round(stock_ic, 4),
         "stock_baseline_daily_rank_ic": round(stock_baseline_ic, 4),
         "stock_costed_mean_daily_excess": round(stock_costed_excess, 4),
         "stock_baseline_costed_mean_daily_excess": round(stock_baseline_costed_excess, 4),
+        "stock_costed_validation_days": len(stock_compare_days),
+        "stock_costed_positive_rate": round(stock_costed_positive_rate, 4),
+        "stock_costed_baseline_win_rate": round(stock_costed_win_rate, 4),
         # 兼容旧监控字段；语义已改为每日横截面 IC 均值。
         "sector_rank_ic": round(sector_ic, 4),
         "stock_rank_ic": round(stock_ic, 4),
@@ -378,27 +435,52 @@ def _train_all_impl(storage: Storage, trade_date: str, started: str) -> dict:
     previous = load_latest()
     previous_meta = (previous or {}).get("meta") or {}
     previous_metrics = previous_meta.get("metrics") or {}
+    min_stability_days = config.env_int("MODEL_MIN_STABILITY_DAYS", 20)
+    market_walkforward_ok = bool(
+        walkforward.get("folds", 0) >= config.env_int("MODEL_MIN_WALKFORWARD_FOLDS", 4)
+        and float(walkforward.get("mean_brier", 1.0)) + 0.002
+        < float(walkforward.get("mean_baseline_brier", 0.0))
+        and float(walkforward.get("win_rate", 0.0)) >= 0.60
+    )
+    sector_stability_ok = bool(
+        len(sector_compare_days) >= min_stability_days
+        and sector_positive_rate >= 0.55
+        and sector_win_rate >= 0.55
+    )
+    stock_stability_ok = bool(
+        len(stock_compare_days) >= min_stability_days
+        and stock_costed_positive_rate >= 0.50
+        and stock_costed_win_rate >= 0.55
+    )
+    market_holdout_ok = market_brier + 0.002 < market_baseline_brier
+    sector_holdout_ok = sector_ic > max(0.0, sector_baseline_ic + 0.005)
+    stock_holdout_ok = (
+        stock_ic > max(0.0, stock_baseline_ic + 0.005)
+        and stock_costed_excess > max(0.0, stock_baseline_costed_excess)
+    )
     component_status = {
         "market": {
-            "approved": market_brier + 0.002 < market_baseline_brier,
-            "reason": "beats_unconditional_brier" if market_brier + 0.002 < market_baseline_brier else "fails_unconditional_brier",
+            "approved": market_holdout_ok and market_walkforward_ok,
+            "reason": (
+                "beats_holdout_and_stable_walkforward"
+                if market_holdout_ok and market_walkforward_ok
+                else "fails_holdout_or_walkforward_stability"
+            ),
         },
         "sector": {
-            "approved": sector_ic > max(0.0, sector_baseline_ic + 0.005),
-            "reason": "beats_momentum_daily_ic" if sector_ic > max(0.0, sector_baseline_ic + 0.005) else "fails_momentum_daily_ic",
+            "approved": sector_holdout_ok and sector_stability_ok,
+            "reason": (
+                "beats_momentum_ic_with_daily_stability"
+                if sector_holdout_ok and sector_stability_ok
+                else "fails_ic_or_daily_stability"
+            ),
         },
         "stock": {
-            "approved": (
-                stock_ic > max(0.0, stock_baseline_ic + 0.005)
-                and stock_costed_excess > max(0.0, stock_baseline_costed_excess)
-            ),
+            "approved": stock_holdout_ok and stock_stability_ok,
             "reason": (
-                "beats_daily_ic_and_costed_portfolio"
-                if (
-                    stock_ic > max(0.0, stock_baseline_ic + 0.005)
-                    and stock_costed_excess > max(0.0, stock_baseline_costed_excess)
-                )
-                else "fails_daily_ic_or_costed_portfolio"
+                "beats_ic_and_costed_portfolio_with_daily_stability"
+                if stock_holdout_ok and stock_stability_ok
+                else "fails_ic_cost_or_daily_stability"
             ),
         },
     }
@@ -437,10 +519,16 @@ def _train_all_impl(storage: Storage, trade_date: str, started: str) -> dict:
             "market_walkforward_folds", "market_walkforward_mean_brier",
             "market_walkforward_mean_baseline_brier", "market_walkforward_win_rate",
         ),
-        "sector": ("sector_daily_rank_ic", "sector_baseline_daily_rank_ic", "sector_rank_ic", "sector_rows"),
+        "sector": (
+            "sector_daily_rank_ic", "sector_baseline_daily_rank_ic", "sector_rank_ic",
+            "sector_validation_days", "sector_positive_ic_rate", "sector_baseline_win_rate",
+            "sector_rows",
+        ),
         "stock": (
             "stock_daily_rank_ic", "stock_baseline_daily_rank_ic", "stock_rank_ic",
             "stock_costed_mean_daily_excess", "stock_baseline_costed_mean_daily_excess",
+            "stock_costed_validation_days", "stock_costed_positive_rate",
+            "stock_costed_baseline_win_rate",
             "stock_rows",
         ),
     }

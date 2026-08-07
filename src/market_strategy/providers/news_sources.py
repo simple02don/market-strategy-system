@@ -1,4 +1,4 @@
-"""免费新闻/政策/公告源：中国政府网、部委列表、财联社（Tushare）、巨潮公告、东财。"""
+"""免费新闻/政策/公告源：中国政府网、部委列表、财联社（Tushare）、巨潮公告。"""
 
 from __future__ import annotations
 
@@ -30,6 +30,28 @@ def _dedup_key(source: str, title: str) -> str:
     del source
     normalized = re.sub(r"[\W_]+", "", _clean(title).lower(), flags=re.UNICODE)
     return _hash(normalized)
+
+
+def _extract_publish_time(fragment: str) -> str:
+    """从列表项附近提取可审计日期；无法确认时保持空值并由 PIT 过滤剔除。"""
+    patterns = (
+        r"(?P<y>20\d{2})[-/.年](?P<m>\d{1,2})[-/.月](?P<d>\d{1,2})日?",
+        r"(?P<y>20\d{2})(?P<m>\d{2})(?P<d>\d{2})",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, fragment)
+        if not match:
+            continue
+        try:
+            value = datetime(
+                int(match.group("y")),
+                int(match.group("m")),
+                int(match.group("d")),
+            )
+        except ValueError:
+            continue
+        return value.strftime("%Y-%m-%d 00:00:00")
+    return ""
 
 
 class NewsCollector:
@@ -72,7 +94,13 @@ class NewsCollector:
         resp.raise_for_status()
         text = resp.text
         out = []
-        for href, title in re.findall(r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', text, re.S | re.I):
+        anchor_pattern = re.compile(
+            r'<a[^>]+href="(?P<href>[^"]+)"[^>]*>(?P<title>.*?)</a>',
+            re.S | re.I,
+        )
+        for match in anchor_pattern.finditer(text):
+            href = match.group("href")
+            title = match.group("title")
             href = href.strip()
             title = _clean(re.sub(r"<[^>]+>", "", title))
             if not re.search(pattern, href) or not title:
@@ -81,6 +109,7 @@ class NewsCollector:
                 from urllib.parse import urljoin
 
                 href = urljoin(page_url, href)
+            nearby = text[max(0, match.start() - 100): min(len(text), match.end() + 180)]
             out.append(
                 {
                     "source": source,
@@ -89,7 +118,7 @@ class NewsCollector:
                     "summary": "",
                     "url": href,
                     "category": category,
-                    "publish_time": "",
+                    "publish_time": _extract_publish_time(nearby),
                     "tier": 1,
                     "dedup_key": _dedup_key(source, title),
                 }

@@ -15,42 +15,31 @@ def _is_st(name: str) -> bool:
     return "ST" in name.upper() or "退" in name
 
 
-def rank_stocks(
+def hard_eligible_stocks(
     bars: pd.DataFrame,
     basics: pd.DataFrame,
     stocks: list[tuple],
     trade_date: str,
-    *,
-    industry_excess: dict[str, float] | None = None,
-    stock_evidence: dict[str, float] | None = None,
-) -> list[dict[str, Any]]:
-    """返回按评分降序的候选列表（含硬过滤信息）。"""
+) -> pd.DataFrame:
+    """返回通过统一硬过滤的股票池，供常规与防守路线共同使用。"""
     min_circ_mv = config.env_float("MIN_CIRC_MV", 110)
     min_list_days = config.env_int("MIN_LIST_DAYS", 60)
     min_amount = config.env_float("MIN_AMOUNT_20D", 1.5e8)
-    primary_max = config.env_int("PRIMARY_MAX", 3)
-    primary_max_same_industry = config.env_int("PRIMARY_MAX_SAME_INDUSTRY", 2)
-    watch_max = config.env_int("WATCH_MAX", 5)
-    primary_rule_min = config.env_float("PRIMARY_RULE_MIN_SCORE", 75.0)
-    industry_excess = industry_excess or {}
-    stock_evidence = stock_evidence or {}
-
     if stocks and len(stocks[0]) >= 4:
         stock_df = pd.DataFrame(stocks, columns=["ts_code", "name", "industry", "list_date"])
     else:
         stock_df = pd.DataFrame(stocks, columns=["ts_code", "name", "industry"])
         stock_df["list_date"] = ""
     if stock_df.empty:
-        return []
+        return pd.DataFrame()
     stock_df["symbol"] = stock_df["ts_code"].str.split(".").str[0]
     stock_df = stock_df[
         ~stock_df["name"].map(_is_st)
         & ~stock_df["symbol"].str.startswith(("688", "689", "8", "4", "920", "200", "900"))
     ]
-
     today = bars[bars["trade_date"] == trade_date]
     if today.empty:
-        return []
+        return pd.DataFrame()
     merged = today.merge(stock_df, on="ts_code", how="inner")
     if basics is not None and not basics.empty:
         merged = merged.merge(
@@ -58,13 +47,14 @@ def rank_stocks(
             on="ts_code",
             how="left",
         )
+    else:
+        merged[["pe_ttm", "circ_mv", "turnover_rate"]] = np.nan
     history = bars[bars["trade_date"] <= trade_date].copy()
     amounts = history.pivot_table(index="ts_code", columns="trade_date", values="amount")
     returns = history.pivot_table(index="ts_code", columns="trade_date", values="pct_chg")
-    # Tushare daily.amount 单位为千元，统一换算为元
     merged["amount_20d"] = merged["ts_code"].map(
         lambda code: (
-            float(amounts.loc[code].tail(20).mean()) * 1000
+            float(amounts.loc[code].dropna().tail(20).mean()) * 1000
             if code in amounts.index
             else np.nan
         )
@@ -83,8 +73,7 @@ def rank_stocks(
             else np.nan
         )
     )
-
-    # Tushare daily_basic 的 circ_mv 单位为万元，换算为亿元
+    # Tushare daily_basic.circ_mv 单位为万元；daily.amount 单位为千元。
     merged["circ_mv"] = pd.to_numeric(merged["circ_mv"], errors="coerce") / 1e4
     merged["pe_ttm"] = pd.to_numeric(merged["pe_ttm"], errors="coerce")
     merged["pct_chg"] = pd.to_numeric(merged["pct_chg"], errors="coerce")
@@ -103,21 +92,43 @@ def rank_stocks(
 
     def hard_block(row) -> str:
         if not np.isfinite(row["circ_mv"]) or row["circ_mv"] < min_circ_mv:
-            return f"流通市值{row['circ_mv']:.0f}亿<{min_circ_mv:.0f}亿"
+            return "流通市值不足"
         if not np.isfinite(row["pe_ttm"]) or not (0 < row["pe_ttm"] < 300):
-            return f"PE(TTM)={row['pe_ttm']}不在0-300"
+            return "PE(TTM)不在0-300"
         if not np.isfinite(row["amount_20d"]) or row["amount_20d"] < min_amount:
             return "20日均额不足"
         if row["list_days"] < min_list_days:
-            return f"上市{row['list_days']}天<{min_list_days}天"
+            return "上市时间不足"
         if row["limit_up_break"]:
             return "当日接近涨停"
-        if row["ret_5d"] is not None and row["ret_5d"] > 0.35:
+        if np.isfinite(row["ret_5d"]) and row["ret_5d"] > 0.35:
             return "5日涨幅过热"
         return ""
 
     merged["block"] = merged.apply(hard_block, axis=1)
-    passed = merged[merged["block"] == ""].copy()
+    return merged[merged["block"] == ""].copy()
+
+
+def rank_stocks(
+    bars: pd.DataFrame,
+    basics: pd.DataFrame,
+    stocks: list[tuple],
+    trade_date: str,
+    *,
+    industry_excess: dict[str, float] | None = None,
+    stock_evidence: dict[str, float] | None = None,
+    target_industries: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """返回按评分降序的候选列表（含硬过滤信息）。"""
+    primary_max = config.env_int("PRIMARY_MAX", 3)
+    primary_max_same_industry = config.env_int("PRIMARY_MAX_SAME_INDUSTRY", 2)
+    watch_max = config.env_int("WATCH_MAX", 5)
+    risk_control_max = config.env_int("RISK_CONTROL_MAX", 3)
+    primary_rule_min = config.env_float("PRIMARY_RULE_MIN_SCORE", 75.0)
+    industry_excess = industry_excess or {}
+    stock_evidence = stock_evidence or {}
+
+    passed = hard_eligible_stocks(bars, basics, stocks, trade_date)
     if passed.empty:
         return []
 
@@ -146,7 +157,17 @@ def rank_stocks(
     primary_count = 0
     watch_count = 0
     primary_industry_counts: dict[str, int] = {}
-    for _, row in passed.head(primary_max + watch_max + 3).iterrows():
+    # 常规榜单保留全局前列；目标板块的全部硬过滤合格股票也进入形态筛选，
+    # 避免先按全市场分数截断后再筛目标板块造成系统性漏选。
+    selection = passed.head(primary_max + watch_max + risk_control_max)
+    target_set = set(target_industries or set())
+    if target_set:
+        selection = pd.concat(
+            [selection, passed[passed["industry"].isin(target_set)]],
+            ignore_index=False,
+        ).drop_duplicates(subset=["ts_code"])
+        selection = selection.sort_values("score", ascending=False)
+    for _, row in selection.iterrows():
         industry = str(row["industry"] or "")
         if (
             float(row["score"]) >= primary_rule_min

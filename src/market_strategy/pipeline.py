@@ -405,6 +405,24 @@ class NightlyPipeline:
         stocks = self.storage.listed_records()
         industry_map = {code: industry for code, _name, industry, _list_date in stocks}
         evidence["lhb"] = build_lhb_summary(self.storage, latest_str, industry_map)
+        index_daily_df = pd.read_sql_query(
+            """
+            SELECT trade_date, close FROM index_daily
+            WHERE ts_code='000001.SH' AND trade_date <= ?
+            """,
+            self.storage._conn,
+            params=(latest_str,),
+        )
+        intent_sequence = infer_intent_sequence(
+            bars,
+            index_daily_df,
+            industry_map,
+            self.storage,
+            end_date=latest_str,
+            days=5,
+        )
+        intent_forecast = forecast_next_intent(intent_sequence)
+        target_sectors = list(intent_forecast.get("target_sectors") or [])
         sectors = rank_sectors(
             bars,
             latest_str,
@@ -425,6 +443,7 @@ class NightlyPipeline:
             latest_str,
             industry_excess=industry_excess,
             stock_evidence=evidence.get("stock_scores") or {},
+            target_industries=set(target_sectors),
         )
         model_version_effective = "rule_v1"
         models = load_models()
@@ -462,24 +481,6 @@ class NightlyPipeline:
             if stock_last and component_approved(models, "stock"):
                 candidates = infer_stocks(models, stock_last, candidates, evidence=evidence)
                 model_version_effective = f"lgbm_v{(models.get('meta') or {}).get('version', 0)}"
-        index_daily_df = pd.read_sql_query(
-            """
-            SELECT trade_date, close FROM index_daily
-            WHERE ts_code='000001.SH' AND trade_date <= ?
-            """,
-            self.storage._conn,
-            params=(latest_str,),
-        )
-        intent_sequence = infer_intent_sequence(
-            bars,
-            index_daily_df,
-            industry_map,
-            self.storage,
-            end_date=latest_str,
-            days=5,
-        )
-        intent_forecast = forecast_next_intent(intent_sequence)
-        target_sectors = list(intent_forecast.get("target_sectors") or [])
         candidate_codes = {candidate.get("ts_code", "") for candidate in candidates}
         stock_history = {
             code: group
@@ -514,10 +515,10 @@ class NightlyPipeline:
                 extra_industries.add(rebound_sector)
             if extra_industries:
                 haven_extra = defensive_universe(
-                    bars, stocks, haven_sectors, latest_str, mode="haven"
+                    bars, basics, stocks, haven_sectors, latest_str, mode="haven"
                 )
                 rebound_extra = defensive_universe(
-                    bars, stocks, {rebound_sector}, latest_str, mode="rebound"
+                    bars, basics, stocks, {rebound_sector}, latest_str, mode="rebound"
                 )
                 existing_codes = {candidate.get("ts_code") for candidate in candidates}
                 candidates.extend(
@@ -536,12 +537,17 @@ class NightlyPipeline:
                 rebound_sector=rebound_sector,
                 repair_mode=repair_mode,
                 haven_sectors=haven_sectors,
+                risk_control_max=config.env_int("RISK_CONTROL_MAX", 3),
             )
         else:
             candidates = apply_pattern_selection(
                 candidates,
                 stock_history,
                 target_sectors,
+                primary_max=config.env_int("PRIMARY_MAX", 3),
+                primary_max_same_industry=config.env_int("PRIMARY_MAX_SAME_INDUSTRY", 2),
+                watch_max=config.env_int("WATCH_MAX", 5),
+                risk_control_max=config.env_int("RISK_CONTROL_MAX", 3),
                 min_primary_score=config.env_float("PRIMARY_RULE_MIN_SCORE", 75.0),
             )
         last_stage = intent_sequence[-1]["stage"] if intent_sequence else "观望"

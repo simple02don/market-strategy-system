@@ -151,6 +151,17 @@ CREATE TABLE IF NOT EXISTS news_impact (
   PRIMARY KEY (source_id, model_version)
 );
 
+CREATE TABLE IF NOT EXISTS source_document (
+  document_id TEXT PRIMARY KEY,
+  source TEXT,
+  url TEXT,
+  publish_time TEXT,
+  observed_at TEXT NOT NULL,
+  content_hash TEXT,
+  content TEXT,
+  fetch_status TEXT
+);
+
 CREATE TABLE IF NOT EXISTS atomic_fact (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   document_id TEXT NOT NULL,
@@ -704,6 +715,38 @@ class Storage:
         self._conn.commit()
         return inserted
 
+    def upsert_source_document(self, row: dict) -> None:
+        """归档事实抽取实际使用的正文快照，支持来源追溯和重新核验。"""
+        self._conn.execute(
+            """
+            INSERT INTO source_document(
+              document_id, source, url, publish_time, observed_at,
+              content_hash, content, fetch_status)
+            VALUES(?,?,?,?,?,?,?,?)
+            ON CONFLICT(document_id) DO UPDATE SET
+              source=excluded.source, url=excluded.url,
+              publish_time=excluded.publish_time,
+              content_hash=excluded.content_hash, content=excluded.content,
+              fetch_status=excluded.fetch_status
+            """,
+            (
+                row["document_id"], row.get("source", ""), row.get("url", ""),
+                row.get("publish_time", ""), _now(), row.get("content_hash", ""),
+                row.get("content", ""), row.get("fetch_status", ""),
+            ),
+        )
+        self._conn.commit()
+
+    def source_document_ids(self, document_ids: list[str]) -> set[str]:
+        if not document_ids:
+            return set()
+        placeholders = ",".join("?" for _ in document_ids)
+        rows = self._conn.execute(
+            f"SELECT document_id FROM source_document WHERE document_id IN ({placeholders})",
+            document_ids,
+        ).fetchall()
+        return {str(row["document_id"]) for row in rows}
+
     def load_news_impacts(
         self,
         source_ids: list[str],
@@ -928,7 +971,10 @@ class Storage:
                 WHERE category='candidate' AND is_formal=1
                 GROUP BY trade_date, entity
               )
-              AND id NOT IN (SELECT prediction_id FROM execution_replay)
+              AND id NOT IN (
+                SELECT prediction_id FROM execution_replay
+                WHERE verdict IN ('filled', 'not_filled', 'canceled')
+              )
             ORDER BY id
             """,
             (max_data_date,),

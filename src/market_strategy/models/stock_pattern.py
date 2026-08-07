@@ -14,6 +14,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .stock_rank import hard_eligible_stocks
+
 
 def classify_stock_route(frame: pd.DataFrame | None) -> tuple[str, dict[str, Any]]:
     empty = {"reason": "no_history"}
@@ -177,6 +179,7 @@ def route_near_miss(
 
 def defensive_universe(
     bars: pd.DataFrame,
+    basics: pd.DataFrame,
     stocks: list[tuple],
     industries: set[str],
     trade_date: str,
@@ -192,7 +195,7 @@ def defensive_universe(
     """
     if not industries:
         return []
-    stock_df = pd.DataFrame(stocks, columns=["ts_code", "name", "industry", "list_date"])
+    stock_df = hard_eligible_stocks(bars, basics, stocks, trade_date)
     stock_df = stock_df[stock_df["industry"].isin(industries)]
     out: list[dict] = []
     for row in stock_df.itertuples(index=False):
@@ -259,6 +262,10 @@ def defensive_universe(
                 "ret5": round(ret5, 2),
                 "ret15": round(ret15, 2),
                 "ma20_slope": round(ma20_slope, 2),
+                "circ_mv": round(float(row.circ_mv), 1),
+                "pe_ttm": round(float(row.pe_ttm), 2),
+                "turnover_rate": round(float(row.turnover_rate), 2),
+                "amount_20d_yi": round(float(row.amount_20d) / 1e8, 2),
                 "tier": "risk_control",
                 "confirm_conditions": "触发条件见操作建议；不满足不买入",
             }
@@ -276,6 +283,7 @@ def defensive_selection(
     rebound_max: int = 3,
     repair_max: int = 3,
     haven_max: int = 3,
+    risk_control_max: int = 3,
     min_score: float = 55.0,
     min_watch_score: float = 50.0,
 ) -> list[dict]:
@@ -358,7 +366,15 @@ def defensive_selection(
         else:
             cand["tier"] = "risk_control"
             cand["action"] = "回避"
-    return out
+    selected: list[dict] = []
+    risk_taken = 0
+    for cand in out:
+        if cand.get("tier") == "risk_control":
+            if risk_taken >= risk_control_max:
+                continue
+            risk_taken += 1
+        selected.append(cand)
+    return selected
 
 
 def apply_pattern_selection(
@@ -369,6 +385,7 @@ def apply_pattern_selection(
     primary_max: int = 3,
     primary_max_same_industry: int = 2,
     watch_max: int = 5,
+    risk_control_max: int = 3,
     min_primary_score: float = 75.0,
     min_watch_score: float = 55.0,
 ) -> list[dict]:
@@ -438,4 +455,12 @@ def apply_pattern_selection(
         else:
             cand["tier"] = "risk_control"
             cand.setdefault("action", "回避")
-    return out
+    selected: list[dict] = []
+    risk_taken = 0
+    for cand in out:
+        if cand.get("tier") == "risk_control":
+            if risk_taken >= risk_control_max:
+                continue
+            risk_taken += 1
+        selected.append(cand)
+    return selected

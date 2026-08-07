@@ -15,6 +15,13 @@ from typing import Any
 from .. import config
 
 
+class _RestrictedUnpickler(pickle.Unpickler):
+    """只允许 pickle 的基础容器/标量 opcode，禁止导入并执行任意类。"""
+
+    def find_class(self, module: str, name: str):  # noqa: ARG002
+        raise pickle.UnpicklingError("global classes are forbidden in shared cache")
+
+
 class SharedCacheReader:
     def __init__(self, cache_dir: str | None = None):
         self.cache_dir = Path(cache_dir or config.env_str("SHARED_EVENT_CACHE_DIR"))
@@ -36,8 +43,16 @@ class SharedCacheReader:
         if not files:
             return {"items": [], "asof": "", "ok": False, "reason": "no_file"}
         try:
-            with open(files[-1], "rb") as handle:
-                data = pickle.load(handle)
+            cache_root = self.cache_dir.resolve()
+            selected = Path(files[-1])
+            resolved = selected.resolve()
+            if cache_root not in resolved.parents:
+                raise ValueError("cache_path_outside_shared_root")
+            max_bytes = config.env_int("SHARED_EVENT_CACHE_MAX_BYTES", 20 * 1024 * 1024)
+            if resolved.stat().st_size > max_bytes:
+                raise ValueError("cache_file_too_large")
+            with resolved.open("rb") as handle:
+                data = _RestrictedUnpickler(handle).load()
             if not isinstance(data, dict):
                 return {"items": [], "asof": "", "ok": False, "reason": "invalid_root_type"}
             version = data.get("schema_version") or data.get("version")

@@ -37,10 +37,10 @@ def replay_candidate(
     open_price = float(minute_rows[0].get("open") or minute_rows[0].get("close") or 0.0)
     high_open_pct = open_price / pre_close - 1.0 if pre_close else 0.0
     window = minute_rows[:15]
-    if len(window) < 5:
+    if len(window) < 15:
         return {
             **base,
-            "verdict": "not_filled",
+            "verdict": "no_data",
             "high_open_pct": round(high_open_pct, 4),
             "exit_price": float(minute_rows[-1].get("close") or 0.0),
             "reason": "分钟数据不足15根，无法确认",
@@ -72,7 +72,8 @@ def replay_candidate(
         return {
             **common,
             "verdict": "filled",
-            "entry_price": round(open_price, 4),
+            # 确认发生在第15根分钟线收盘后，成交价不能回看成开盘价。
+            "entry_price": round(close_15, 4),
             "reason": "开盘15分钟站稳分时均线",
         }
     return {**common, "verdict": "not_filled", "reason": "开盘15分钟未站稳分时均线"}

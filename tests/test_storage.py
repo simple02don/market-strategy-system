@@ -130,6 +130,7 @@ def test_pending_replays_excludes_already_replayed(tmp_path):
     }
     storage.save_prediction(**common, entity="600001.SH", payload={"score": 80})
     storage.save_prediction(**common, entity="600002.SH", payload={"score": 79})
+    storage.save_prediction(**common, entity="600003.SH", payload={"score": 78})
     rows = storage._conn.execute(
         "SELECT id, entity FROM prediction_log ORDER BY id"
     ).fetchall()
@@ -145,6 +146,41 @@ def test_pending_replays_excludes_already_replayed(tmp_path):
             "source": "tushare",
         }
     )
+    storage.save_execution_replay(
+        {
+            "prediction_id": rows[1]["id"],
+            "trade_date": "20260806",
+            "ts_code": rows[1]["entity"],
+            "verdict": "no_data",
+            "reason": "分钟数据不足15根，无法确认",
+            "source": "",
+        }
+    )
     pending = storage.pending_replays("20260806")
-    assert [row["entity"] for row in pending] == ["600002.SH"]
+    assert [row["entity"] for row in pending] == ["600002.SH", "600003.SH"]
+    storage.close()
+
+
+def test_source_document_archive_is_upserted(tmp_path):
+    storage = Storage(tmp_path / "documents.db")
+    storage.upsert_source_document(
+        {
+            "document_id": "doc-1",
+            "source": "govcn_policy",
+            "url": "https://example.test/policy",
+            "publish_time": "2026-08-06 10:00:00",
+            "content_hash": "abc",
+            "content": "政策正文快照",
+            "fetch_status": "ok",
+        }
+    )
+    assert storage.source_document_ids(["doc-1", "missing"]) == {"doc-1"}
+    row = storage._conn.execute(
+        "SELECT source, content, fetch_status FROM source_document WHERE document_id='doc-1'"
+    ).fetchone()
+    assert dict(row) == {
+        "source": "govcn_policy",
+        "content": "政策正文快照",
+        "fetch_status": "ok",
+    }
     storage.close()
