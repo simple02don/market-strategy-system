@@ -238,6 +238,7 @@ CREATE TABLE IF NOT EXISTS execution_replay (
   trade_date TEXT NOT NULL,
   ts_code TEXT NOT NULL,
   verdict TEXT NOT NULL,
+  plan_type TEXT,
   high_open_pct REAL,
   vwap_15m REAL,
   close_15m REAL,
@@ -299,6 +300,11 @@ class Storage:
         }
         if "measurement" not in outcome_columns:
             self._conn.execute("ALTER TABLE candidate_outcome ADD COLUMN measurement TEXT")
+        replay_columns = {
+            str(row[1]) for row in self._conn.execute("PRAGMA table_info(execution_replay)").fetchall()
+        }
+        if "plan_type" not in replay_columns:
+            self._conn.execute("ALTER TABLE execution_replay ADD COLUMN plan_type TEXT")
 
     def close(self) -> None:
         self._conn.close()
@@ -945,6 +951,7 @@ class Storage:
             SELECT id, trade_date, entity, payload FROM prediction_log
             WHERE category='candidate'
               AND is_formal=1
+              AND json_extract(payload, '$.tier') IN ('primary','haven','rebound','repair')
               AND trade_date <= ?
               AND id IN (
                 SELECT MAX(id) FROM prediction_log
@@ -965,6 +972,7 @@ class Storage:
             SELECT id, trade_date, entity, payload FROM prediction_log
             WHERE category='candidate'
               AND is_formal=1
+              AND json_extract(payload, '$.tier') IN ('primary','haven','rebound','repair')
               AND trade_date <= ?
               AND id IN (
                 SELECT MAX(id) FROM prediction_log
@@ -1003,12 +1011,13 @@ class Storage:
         self._conn.execute(
             """
             INSERT INTO execution_replay(
-              prediction_id, trade_date, ts_code, verdict, high_open_pct,
+              prediction_id, trade_date, ts_code, verdict, plan_type, high_open_pct,
               vwap_15m, close_15m, entry_price, exit_price, reason, source,
               created_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(prediction_id) DO UPDATE SET
-              verdict=excluded.verdict, high_open_pct=excluded.high_open_pct,
+              verdict=excluded.verdict, plan_type=excluded.plan_type,
+              high_open_pct=excluded.high_open_pct,
               vwap_15m=excluded.vwap_15m, close_15m=excluded.close_15m,
               entry_price=excluded.entry_price, exit_price=excluded.exit_price,
               reason=excluded.reason, source=excluded.source,
@@ -1017,6 +1026,7 @@ class Storage:
             (
                 row["prediction_id"], row.get("trade_date", ""),
                 row.get("ts_code", ""), row.get("verdict", ""),
+                row.get("plan_type", ""),
                 row.get("high_open_pct"), row.get("vwap_15m"),
                 row.get("close_15m"), row.get("entry_price"),
                 row.get("exit_price"), row.get("reason", ""),
@@ -1070,6 +1080,12 @@ class Storage:
         return [dict(row) for row in rows]
 
     def outcome_summary(self) -> dict:
+        # 旧版本把所有候选都按“次日开盘买入”代理统计，且包含观察/回避层。
+        # 修复后的统计只允许真实触发回放口径进入主指标，旧样本保留但隔离展示。
+        valid_measurements = (
+            "trigger_entry_to_close_after_cost",
+            "trigger_not_executed_cash",
+        )
         row = self._conn.execute(
             """
             SELECT COUNT(*) AS n,
@@ -1077,18 +1093,28 @@ class Storage:
                    SUM(CASE WHEN excess > 0 THEN 1 ELSE 0 END) AS win,
                    AVG(ret_next) AS mean_ret
             FROM candidate_outcome
-            """
+            WHERE measurement IN (?, ?)
+            """,
+            valid_measurements,
         ).fetchone()
         n = int(row["n"] or 0)
         tier_rows = self._conn.execute(
             """
             SELECT tier, COUNT(*) AS n, AVG(excess) AS mean_excess,
                    SUM(CASE WHEN excess > 0 THEN 1 ELSE 0 END) AS win
-            FROM candidate_outcome GROUP BY tier
-            """
+            FROM candidate_outcome
+            WHERE measurement IN (?, ?)
+            GROUP BY tier
+            """,
+            valid_measurements,
         ).fetchall()
+        total = int(
+            self._conn.execute("SELECT COUNT(*) FROM candidate_outcome").fetchone()[0]
+            or 0
+        )
         return {
             "n": n,
+            "legacy_excluded": max(0, total - n),
             "mean_excess": round(float(row["mean_excess"] or 0.0), 4),
             "hit_rate": round(int(row["win"] or 0) / n, 4) if n else 0.0,
             "mean_ret": round(float(row["mean_ret"] or 0.0), 4),

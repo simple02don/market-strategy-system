@@ -61,6 +61,13 @@ def generate_report(payload: dict[str, Any], output: Path) -> Path:
     data_status = payload.get("data_status") or {}
     stale_days = int(payload.get("stale_days") or 0)
     system_status = payload.get("system_status", "normal")
+    run_mode = str(payload.get("run_mode") or "unknown")
+    run_mode_label = {
+        "dry_run": "干跑/测试",
+        "formal_pending": "正式推送待确认",
+        "formal": "正式",
+        "push_failed": "推送失败（非正式）",
+    }.get(run_mode, run_mode)
 
     state_rows = "".join(
         f"<tr><td>{_esc(k)}</td><td>{_pct(v)}</td></tr>"
@@ -174,7 +181,9 @@ def generate_report(payload: dict[str, Any], output: Path) -> Path:
             f"{_esc(lhb.get('inst_net_buy_total_yi'))} 亿</p>"
         )
         lhb_inflow = "、".join(
-            f"{_esc(item.get('industry'))}（{_esc(item.get('net_amount_yi'))}亿）"
+            f"{_esc(item.get('industry'))}（{_esc(item.get('net_amount_yi'))}亿；"
+            f"正流入{_esc(item.get('positive_count', 0))}/"
+            f"{_esc(item.get('stock_count', 0))}）"
             for item in (lhb.get("top_inflows") or [])[:3]
         ) or "无"
         lhb_outflow = "、".join(
@@ -209,8 +218,27 @@ def generate_report(payload: dict[str, Any], output: Path) -> Path:
         if system_status != "normal"
         else ""
     )
+    if run_mode == "dry_run":
+        mode_warning = (
+            "<p class='warn'>这是干跑/测试报告，未进入正式预测记录，"
+            "不应作为正式荐股结果统计。</p>"
+        )
+    elif run_mode == "push_failed":
+        mode_warning = (
+            "<p class='warn'>本次企业微信推送失败，未进入正式预测记录，"
+            "不应作为正式荐股结果统计。</p>"
+        )
+    elif run_mode == "formal_pending":
+        mode_warning = "<p class='warn'>正式推送状态尚未确认。</p>"
+    else:
+        mode_warning = ""
+    target_notice = (
+        f"<div class='target'><b>预测目标交易日：{next_day}</b><br>"
+        f"行情与证据截止于 {trade_date}；只有目标日满足候选确认条件才视为成交。"
+        "目标日前的涨跌不计入本报告结果。</div>"
+    )
     document = f"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
-<title>主力策略情景推演 · {trade_date}</title>
+<title>主力策略情景推演 · 目标日 {next_day}</title>
 <style>
 body{{background:#0f1420;color:#dfe6f2;font-family:-apple-system,"PingFang SC",sans-serif;margin:0}}
 .wrap{{max-width:960px;margin:0 auto;padding:24px}}
@@ -218,15 +246,18 @@ h1{{font-size:22px;margin:0 0 4px}} h2{{font-size:16px;border-left:3px solid #4f
 .meta{{color:#8fa0bd;font-size:13px;line-height:1.8}}
 .card{{background:#171e2e;border:1px solid #26304a;border-radius:10px;padding:16px;margin:12px 0}}
 .warn{{color:#ffb45e;background:#2a2114;border:1px solid #6b4c1d;border-radius:8px;padding:10px}}
+.target{{color:#dce9ff;background:#172b4d;border:1px solid #3e6fb0;border-radius:8px;padding:12px;margin:12px 0;line-height:1.7}}
 table{{width:100%;border-collapse:collapse;font-size:13px}}
 th,td{{text-align:left;padding:7px 8px;border-bottom:1px solid #26304a}}
 th{{color:#8fa0bd;font-weight:500}}
 .foot{{color:#6b7a96;font-size:12px;margin-top:24px;line-height:1.8}}
 </style></head><body><div class="wrap">
 <h1>主力策略情景推演与分层选股</h1>
-<div class="meta">交易日 {trade_date} → 下一交易日 {next_day}<br>
+<div class="meta">数据截止交易日 {trade_date} · 预测目标交易日 {next_day} · 运行模式 {_esc(run_mode_label)}<br>
 决策时点 {_esc(payload.get('decision_time'))} · 信息截止 {cutoff}<br>
 数据集 {_esc(payload.get('dataset_version'))} · 模型 {_esc(payload.get('model_version'))} · 系统状态 {_esc(system_status)}</div>
+	{target_notice}
+	{mode_warning}
 	{stale_warning}
 	{status_warning}
 <div class="card"><h2>今日市场状态</h2>
@@ -249,7 +280,7 @@ th{{color:#8fa0bd;font-weight:500}}
 	{lhb_card}
 <div class="card"><h2>板块职责与相对强弱 Top8</h2>
 <table><tr><th>行业</th><th>职责</th><th>评分</th><th>当日</th><th>20日超额</th></tr>{sector_rows}</table></div>
-<div class="card"><h2>个股推荐</h2>
+<div class="card"><h2>条件候选（未触发即不成交）</h2>
 <table><tr><th>名称</th><th>代码</th><th>层级</th><th>角色</th><th>评分</th><th>行业</th><th>形态</th><th>支撑/压力</th><th>操作</th><th>确认条件</th></tr>{candidate_rows}</table></div>
 <div class="card"><h2>政策/公告事实要点</h2><ul>{fact_lines}</ul></div>
 	<div class="foot">本系统只生成研究与概率推演，不构成投资建议；不自动下单。<br>

@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .. import config
 from .stock_rank import hard_eligible_stocks
 
 
@@ -117,6 +118,7 @@ def classify_stock_route(frame: pd.DataFrame | None) -> tuple[str, dict[str, Any
 
     detail = {
         "price": round(price, 3),
+        "ma20": round(float(ma20.iloc[-1]), 4),
         "ma5_slope_pct": round(ma5_slope, 3),
         "ma20_slope_pct": round(ma20_slope, 3),
         "breakout20": bool(breakout20),
@@ -186,18 +188,28 @@ def defensive_universe(
     *,
     mode: str = "haven",
     min_rows: int = 30,
+    sector_evidence: dict[str, dict[str, Any]] | None = None,
+    stock_flow_yi: dict[str, float] | None = None,
 ) -> list[dict]:
     """为防守模式按“结构健康度”选候选，而不是按动量。
 
-    - haven（避风港）：站上 MA20、未过热（ret15≤15、ret5≤12）、MA20 不崩；
-    - rebound（反包猎手）：未深破位（收盘≥MA20*0.95、MA20 斜率≥-8%），
-      且今日出现止跌特征（收阳或长下影）。
+    - haven（避风港）：行业龙虎榜净流入有广度，个股站上上行 MA20、收盘位置健康、
+      未过热且直接龙虎榜资金不为负；
+    - rebound（反包猎手）：收盘不深破 MA20、斜率未明显转坏，且出现止跌特征。
     """
     if not industries:
         return []
     stock_df = hard_eligible_stocks(bars, basics, stocks, trade_date)
     stock_df = stock_df[stock_df["industry"].isin(industries)]
     out: list[dict] = []
+    stock_flow_yi = stock_flow_yi or {}
+    min_sector_net = config.env_float("HAVEN_MIN_SECTOR_LHB_NET_YI", 1.0)
+    min_sector_positive = config.env_int("HAVEN_MIN_SECTOR_LHB_POSITIVE_STOCKS", 2)
+    min_sector_positive_share = config.env_float("HAVEN_MIN_SECTOR_LHB_POSITIVE_SHARE", 0.60)
+
+    def clipped(value: float) -> float:
+        return max(0.0, min(100.0, value))
+
     for row in stock_df.itertuples(index=False):
         code = str(row.ts_code)
         frame = bars[bars["ts_code"] == code].sort_values("trade_date")
@@ -225,32 +237,70 @@ def defensive_universe(
         )
         today_pct = float(today["pct_chg"] or 0.0)
         above_ma20 = price > ma20
+        ma20_distance = (price / ma20 - 1.0) * 100.0 if ma20 > 0 else 999.0
+        industry = str(row.industry)
+        sector_signal = (sector_evidence or {}).get(industry, {})
+        sector_net_yi = float(sector_signal.get("net_amount_yi", 0.0) or 0.0)
+        sector_positive_count = int(sector_signal.get("positive_count", 0) or 0)
+        sector_positive_share = float(sector_signal.get("positive_share", 0.0) or 0.0)
+        direct_flow = stock_flow_yi.get(code)
         if mode == "haven":
+            evidence_ok = bool(
+                sector_evidence is None
+                or (
+                    sector_net_yi >= min_sector_net
+                    and sector_positive_count >= min_sector_positive
+                    and sector_positive_share >= min_sector_positive_share
+                )
+            )
             eligible = bool(
-                above_ma20 and ret15 <= 15.0 and ret5 <= 12.0 and ma20_slope >= -3.0
+                above_ma20
+                and ma20_slope >= config.env_float("HAVEN_MIN_MA20_SLOPE_PCT", 0.0)
+                and -2.0 <= ret5 <= 12.0
+                and -5.0 <= ret15 <= 15.0
+                and close_loc >= config.env_float("HAVEN_MIN_CLOSE_LOCATION", 0.55)
+                and today_pct >= -2.0
+                and ma20_distance <= config.env_float("HAVEN_MAX_MA20_DISTANCE_PCT", 12.0)
+                and evidence_ok
+                and (direct_flow is None or direct_flow >= 0.0)
             )
         else:
             eligible = bool(
-                price >= ma20 * 0.95
-                and ma20_slope >= -8.0
-                and (today_pct > 0 or lower >= 0.12)
+                price >= ma20 * 0.98
+                and ma20_slope >= -5.0
+                and close_loc >= 0.45
+                and (today_pct > 0 or lower >= 0.20)
             )
         if not eligible:
             continue
         route, detail = classify_stock_route(frame)
-        exhaustion = bool(detail.get("exhaustion", False))
+        route_quality = {
+            "just_started": 95.0,
+            "controlled_pullback": 90.0,
+            "rising_trend": 80.0,
+            "not_confirmed": 60.0,
+        }[route]
+        trend_quality = clipped(55.0 + ma20_slope * 12.0)
+        close_quality = clipped(close_loc * 100.0)
+        momentum_quality = clipped(100.0 - abs(ret5 - 3.0) * 8.0)
+        sector_quality = (
+            clipped(35.0 + sector_net_yi * 4.0 + sector_positive_count * 8.0)
+            if sector_evidence is not None and mode == "haven"
+            else 60.0
+        )
         score = round(
-            50.0
-            + close_loc * 20.0
-            + (0.0 if exhaustion else 10.0)
-            + ROUTE_BONUS[route] * 0.5,
+            trend_quality * 0.25
+            + close_quality * 0.20
+            + momentum_quality * 0.15
+            + sector_quality * 0.25
+            + route_quality * 0.15,
             2,
         )
         out.append(
             {
                 "ts_code": code,
                 "name": str(row.name),
-                "industry": str(row.industry),
+                "industry": industry,
                 "score": score,
                 "route": route,
                 "pattern": detail,
@@ -262,6 +312,22 @@ def defensive_universe(
                 "ret5": round(ret5, 2),
                 "ret15": round(ret15, 2),
                 "ma20_slope": round(ma20_slope, 2),
+                "ma20": round(ma20, 4),
+                "ma20_distance_pct": round(ma20_distance, 2),
+                "defensive_qualified": True,
+                "defensive_mode": mode,
+                "sector_net_amount_yi": round(sector_net_yi, 2),
+                "sector_lhb_positive_count": sector_positive_count,
+                "sector_lhb_positive_share": round(sector_positive_share, 4),
+                "stock_lhb_net_amount_yi": direct_flow,
+                "quality": {
+                    "trend": round(trend_quality, 2),
+                    "close": round(close_quality, 2),
+                    "momentum": round(momentum_quality, 2),
+                    "sector": round(sector_quality, 2),
+                    "route": round(route_quality, 2),
+                },
+                "route_score_included": True,
                 "circ_mv": round(float(row.circ_mv), 1),
                 "pe_ttm": round(float(row.pe_ttm), 2),
                 "turnover_rate": round(float(row.turnover_rate), 2),
@@ -271,6 +337,36 @@ def defensive_universe(
             }
         )
     return out
+
+
+def merge_defensive_candidates(
+    candidates: list[dict],
+    structural_candidates: list[dict],
+) -> list[dict]:
+    """用已完成结构验证的记录覆盖同代码常规记录，同时保留个股资讯证据。"""
+    replacements = {
+        str(item.get("ts_code") or ""): item
+        for item in structural_candidates
+        if item.get("ts_code")
+    }
+    merged: list[dict] = []
+    for candidate in candidates:
+        code = str(candidate.get("ts_code") or "")
+        structural = replacements.pop(code, None)
+        if structural is None:
+            merged.append(candidate)
+            continue
+        merged.append(
+            {
+                **candidate,
+                **structural,
+                "evidence_score": candidate.get(
+                    "evidence_score", structural.get("evidence_score", 0.0)
+                ),
+            }
+        )
+    merged.extend(replacements.values())
+    return merged
 
 
 def defensive_selection(
@@ -306,7 +402,11 @@ def defensive_selection(
             "tier": "",
             "route": route,
             "pattern": detail,
-            "score": round(float(cand.get("score", 0.0)) + ROUTE_BONUS[route], 2),
+            "score": round(
+                float(cand.get("score", 0.0))
+                + (0.0 if cand.get("route_score_included") else ROUTE_BONUS[route]),
+                2,
+            ),
         }
         out.append(updated)
     out.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
@@ -319,9 +419,12 @@ def defensive_selection(
     for cand in out:
         score = float(cand.get("score", 0.0))
         industry = str(cand.get("industry") or "")
-        # 结构池（defensive_universe）候选自带 ma20_slope，已通过健康度筛选；
-        # 动量池候选仍要求三形态合格。
-        qualified = cand["route"] != "not_confirmed" or "ma20_slope" in cand
+        # 结构池必须带显式资格标记；不能再以“存在 ma20_slope 字段”冒充合格。
+        # 动量池仍要求三形态之一确认。
+        qualified = bool(
+            cand["route"] != "not_confirmed"
+            or cand.get("defensive_qualified") is True
+        )
         if (
             rebound_sector
             and industry == rebound_sector
@@ -331,10 +434,43 @@ def defensive_selection(
         ):
             cand["tier"] = "rebound"
             cand["action"] = "条件买入（反包猎手）"
-            cand["trigger"] = "次日低开不破前低且分时放量反包时买入"
+            cand["trigger"] = "开盘不跌破前低，前15分钟收阳并站稳VWAP时买入"
+            cand["confirm_conditions"] = cand["trigger"]
+            cand["execution_plan"] = {
+                "version": 1,
+                "type": "rebound_vwap15",
+                "max_open_gap_pct": 0.03,
+                "cancel_open_gap_pct": 0.05,
+                "cancel_below_prev_low": True,
+                "require_close15_above_vwap": True,
+                "require_close15_above_open": True,
+            }
             cand["stop"] = "买入价-3%或跌破前低离场"
             cand["position"] = "≤30%"
             rebound_taken += 1
+        elif (
+            industry in haven_sectors
+            and cand.get("defensive_mode") == "haven"
+            and cand.get("defensive_qualified") is True
+            and haven_taken < haven_max
+            and score >= min_score
+        ):
+            cand["tier"] = "haven"
+            cand["action"] = "低仓位跟随（避风港轮动）"
+            cand["trigger"] = "开盘涨幅≤3%，前15分钟不破前日MA20且收盘站稳VWAP"
+            cand["confirm_conditions"] = cand["trigger"]
+            cand["execution_plan"] = {
+                "version": 1,
+                "type": "haven_vwap15_ma20",
+                "max_open_gap_pct": 0.03,
+                "cancel_open_gap_pct": 0.05,
+                "cancel_below_prev_low": True,
+                "require_close15_above_vwap": True,
+                "min_price": cand.get("ma20") or (cand.get("pattern") or {}).get("ma20"),
+            }
+            cand["stop"] = "买入价-3%"
+            cand["position"] = "≤15%"
+            haven_taken += 1
         elif (
             repair_mode
             and qualified
@@ -343,29 +479,29 @@ def defensive_selection(
         ):
             cand["tier"] = "repair"
             cand["action"] = "分批低吸（超跌修复）"
-            cand["trigger"] = "出现首根放量阳线或长下影企稳后分批介入"
+            cand["trigger"] = "开盘涨幅≤3%，前15分钟出现下影承接且收盘站稳VWAP"
+            cand["confirm_conditions"] = cand["trigger"]
+            cand["execution_plan"] = {
+                "version": 1,
+                "type": "repair_vwap15",
+                "max_open_gap_pct": 0.03,
+                "cancel_open_gap_pct": 0.05,
+                "cancel_below_prev_low": True,
+                "require_close15_above_vwap": True,
+                "min_lower_shadow_ratio": 0.20,
+            }
             cand["stop"] = "前低或买入价-3%"
             cand["position"] = "≤20%"
             repair_taken += 1
-        elif (
-            industry in haven_sectors
-            and qualified
-            and haven_taken < haven_max
-            and score >= min_score
-        ):
-            cand["tier"] = "haven"
-            cand["action"] = "低仓位跟随（避风港轮动）"
-            cand["trigger"] = "回踩不破MA20且板块资金延续净流入时介入"
-            cand["stop"] = "买入价-3%"
-            cand["position"] = "≤15%"
-            haven_taken += 1
         elif watch_taken < 5 and score >= min_watch_score:
             cand["tier"] = "watch"
             cand["action"] = "观察"
+            cand["execution_plan"] = {"version": 1, "type": "observe_only"}
             watch_taken += 1
         else:
             cand["tier"] = "risk_control"
             cand["action"] = "回避"
+            cand["execution_plan"] = {"version": 1, "type": "observe_only"}
     selected: list[dict] = []
     risk_taken = 0
     for cand in out:

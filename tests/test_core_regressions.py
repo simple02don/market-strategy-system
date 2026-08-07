@@ -504,8 +504,17 @@ def test_pipeline_uses_evidence_before_decision_and_can_be_normal(tmp_path, monk
     assert payload["system_status"] == "normal"
     assert payload["evidence"]["sector_scores"]["半导体"] > 0
     assert payload["evidence"]["stock_scores"]["300001"] > 0
+    payload["run_mode"] = "dry_run"
     report = generate_report(payload, tmp_path / "report.html").read_text(encoding="utf-8")
     assert "新闻 / 政策 / 情绪证据" in report
     assert "操盘行为假设" in report
     assert "支持半导体发展" in report
+    assert f"预测目标交易日：{payload['next_trade_date']}" in report
+    assert "目标日前的涨跌不计入本报告结果" in report
+    assert "这是干跑/测试报告" in report
+    payload["run_mode"] = "push_failed"
+    failed_report = generate_report(
+        payload, tmp_path / "report-push-failed.html"
+    ).read_text(encoding="utf-8")
+    assert "企业微信推送失败，未进入正式预测记录" in failed_report
     storage.close()

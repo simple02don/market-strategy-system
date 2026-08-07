@@ -198,8 +198,16 @@ def rank_stocks(
                 "evidence_score": round(float(row["evidence_score"]), 4),
                 "role": _stock_role(row),
                 "tier": tier,
-                "confirm_conditions": "高开≤3%且开盘15分钟站稳分时均线；板块同步走强",
-                "cancel_conditions": "高开>5%放弃；低开破前日低点放弃；板块走弱放弃",
+                "confirm_conditions": "高开≤3%且开盘15分钟站稳分时均线",
+                "cancel_conditions": "高开>5%放弃；低开破前日低点放弃",
+                "execution_plan": {
+                    "version": 1,
+                    "type": "standard_vwap15",
+                    "max_open_gap_pct": 0.03,
+                    "cancel_open_gap_pct": 0.05,
+                    "cancel_below_prev_low": True,
+                    "require_close15_above_vwap": True,
+                },
             }
         )
     return out
