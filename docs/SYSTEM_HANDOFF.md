@@ -9,7 +9,7 @@
 | 项 | 状态 |
 |---|---|
 | 代码 | `main` 为唯一部署分支；每次发布必须让本地、GitHub 与生产运行同一个确切 commit |
-| 测试 | 当前回归基线 139 个；发布前本地与生产都必须完整通过 |
+| 测试 | 当前回归基线 140 个；发布前本地与生产都必须完整通过 |
 | 生产 | `/home/ubuntu/market-strategy-system`（ubuntu 运行，`.env` 600）；`ssh jckx-prod`（root@43.136.54.243，密钥 `~/.ssh/jckx_prod_ed25519`） |
 | 数据 | SQLite `data/market_strategy.sqlite3`，最新行情日 20260807；部署前在线备份位于 `/home/ubuntu/market-strategy-deploy-backups/pre-e22553b/` |
 | 模型 | `models/artifacts/v1`、`v2`（gitignored）；组件未批准 → 线上走规则基线 |
@@ -111,7 +111,7 @@ git clone git@github.com:simple02don/market-strategy-system.git
 cd market-strategy-system
 python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
 cp .env.example .env   # 真实值从生产抄：ssh jckx-prod 'cat .../.env'
-PYTHONPATH=src ./venv/bin/python -m pytest tests/ -q   # 当前期望 139 passed
+PYTHONPATH=src ./venv/bin/python -m pytest tests/ -q   # 当前期望 140 passed
 ```
 
 注意：macOS Intel 上 lightgbm 需要 libomp（放 `/usr/local/opt/libomp/lib/libomp.dylib`，
@@ -155,7 +155,7 @@ ssh jckx-prod 'cd /home/ubuntu/market-strategy-system && git rev-parse HEAD && g
 ## 9. 建议技能（给接手 Agent）
 
 - `diagnosing-bugs`：运行异常先走诊断循环
-- `tdd`：改代码测试先行（仓库当前有 139 个回归测试）
+- `tdd`：改代码测试先行（仓库当前有 140 个回归测试）
 - `self-improvement`：意外失败或纠正时记录教训
 - `handoff`：再次交接时重新生成本文件
 

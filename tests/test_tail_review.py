@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta
 
+import pytest
+
 from market_strategy import config
 from market_strategy.storage import Storage
 from market_strategy.tail_review import (
@@ -25,6 +27,11 @@ class FailingPusher:
     def send_markdown(self, content):
         self.messages.append(content)
         return {"ok": False, "error": "fixture_push_failed"}
+
+
+@pytest.fixture(autouse=True)
+def isolated_report_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "REPORT_DIR", tmp_path / "reports")
 
 
 def _hot_items(primary_code="600001.SH", primary_price=10.5, primary_pct=5.0):
@@ -221,6 +228,29 @@ def test_tail_review_creates_missing_report_directory(tmp_path, monkeypatch):
     assert report_dir.is_dir()
     assert (report_dir / "tail_review_20260806.json").is_file()
     assert result["report_path"] == str(report_dir / "tail_review_20260806.json")
+    storage.close()
+
+
+def test_tail_review_atomically_replaces_read_only_previous_report(tmp_path):
+    report_dir = config.REPORT_DIR
+    report_dir.mkdir(parents=True)
+    report_path = report_dir / "tail_review_20260806.json"
+    report_path.write_text("old", encoding="utf-8")
+    report_path.chmod(0o444)
+    storage = Storage(tmp_path / "tail-read-only-report.db")
+    _seed_stock(storage)
+    _formal_candidate(storage)
+
+    result = run_tail_review(
+        storage,
+        now=datetime(2026, 8, 6, 14, 50),
+        push=False,
+        minute_fetcher=lambda code, _day: _minutes(code),
+        hot_snapshot_fetcher=lambda _day: _hot_items(),
+    )
+
+    assert result["status"] == "ok"
+    assert '"status": "ok"' in report_path.read_text(encoding="utf-8")
     storage.close()
 
 

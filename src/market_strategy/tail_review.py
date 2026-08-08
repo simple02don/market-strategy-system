@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, time, timedelta
 from typing import Any, Callable
@@ -22,6 +24,17 @@ from .execution.minute_metrics import inferred_vwap, normalized_minute_rows
 
 MinuteFetcher = Callable[[str, str], list[dict[str, Any]]]
 HotSnapshotFetcher = Callable[[str], dict[str, Any]]
+
+
+def _atomic_write_json(path, payload: dict[str, Any]) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(temporary_name, path)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
 
 
 def _parse_market_time(value: Any) -> datetime | None:
@@ -679,7 +692,7 @@ def run_tail_review(
         }
         config.REPORT_DIR.mkdir(parents=True, exist_ok=True)
         report_path = config.REPORT_DIR / f"tail_review_{trade_date}.json"
-        report_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        _atomic_write_json(report_path, result)
         result["report_path"] = str(report_path)
         push_result = {"ok": False, "skipped": True}
         if push:
