@@ -347,6 +347,7 @@ def run_tail_review(
             "entries": entries,
             "positions": positions,
         }
+        config.REPORT_DIR.mkdir(parents=True, exist_ok=True)
         report_path = config.REPORT_DIR / f"tail_review_{trade_date}.json"
         report_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         result["report_path"] = str(report_path)

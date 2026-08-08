@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 
+from market_strategy import config
 from market_strategy.storage import Storage
 from market_strategy.tail_review import run_tail_review
 
@@ -182,4 +183,25 @@ def test_tail_review_rejects_locked_limit_price(tmp_path):
 
     assert result["entries"] == []
     assert storage.active_tracking_positions() == []
+    storage.close()
+
+
+def test_tail_review_creates_missing_report_directory(tmp_path, monkeypatch):
+    report_dir = tmp_path / "missing" / "reports"
+    monkeypatch.setattr(config, "REPORT_DIR", report_dir)
+    storage = Storage(tmp_path / "tail-report.db")
+    _seed_stock(storage)
+    _formal_candidate(storage)
+
+    result = run_tail_review(
+        storage,
+        now=datetime(2026, 8, 6, 14, 50),
+        push=False,
+        minute_fetcher=lambda code, _day: _minutes(code),
+        hot_snapshot_fetcher=lambda _day: _hot_items(),
+    )
+
+    assert report_dir.is_dir()
+    assert (report_dir / "tail_review_20260806.json").is_file()
+    assert result["report_path"] == str(report_dir / "tail_review_20260806.json")
     storage.close()
