@@ -20,11 +20,15 @@ def hard_eligible_stocks(
     basics: pd.DataFrame,
     stocks: list[tuple],
     trade_date: str,
+    *,
+    allowed_codes: set[str] | None = None,
+    premium_features: dict[str, dict[str, Any]] | None = None,
 ) -> pd.DataFrame:
     """返回通过统一硬过滤的股票池，供常规与防守路线共同使用。"""
     min_circ_mv = config.env_float("MIN_CIRC_MV", 110)
     min_list_days = config.env_int("MIN_LIST_DAYS", 60)
     min_amount = config.env_float("MIN_AMOUNT_20D", 1.5e8)
+    premium_features = premium_features or {}
     if stocks and len(stocks[0]) >= 4:
         stock_df = pd.DataFrame(stocks, columns=["ts_code", "name", "industry", "list_date"])
     else:
@@ -37,6 +41,8 @@ def hard_eligible_stocks(
         ~stock_df["name"].map(_is_st)
         & ~stock_df["symbol"].str.startswith(("688", "689", "8", "4", "920", "200", "900"))
     ]
+    if allowed_codes is not None:
+        stock_df = stock_df[stock_df["ts_code"].isin(allowed_codes)]
     today = bars[bars["trade_date"] == trade_date]
     if today.empty:
         return pd.DataFrame()
@@ -79,6 +85,15 @@ def hard_eligible_stocks(
     merged["pct_chg"] = pd.to_numeric(merged["pct_chg"], errors="coerce")
     merged["amount"] = pd.to_numeric(merged["amount"], errors="coerce") * 1000
     merged["turnover_rate"] = pd.to_numeric(merged["turnover_rate"], errors="coerce")
+    merged["premium_score"] = merged["ts_code"].map(
+        lambda code: float((premium_features.get(code) or {}).get("score", 0.0))
+    )
+    merged["premium_risk_veto"] = merged["ts_code"].map(
+        lambda code: bool((premium_features.get(code) or {}).get("risk_veto", False))
+    )
+    merged["premium_factor_coverage"] = merged["ts_code"].map(
+        lambda code: float((premium_features.get(code) or {}).get("factor_coverage", 0.0))
+    )
     trade_dt = datetime.strptime(trade_date, "%Y%m%d")
     merged["list_days"] = merged["list_date"].map(
         lambda value: (
@@ -91,6 +106,13 @@ def hard_eligible_stocks(
     merged["limit_up_break"] = merged["pct_chg"] >= limit_up - 0.2
 
     def hard_block(row) -> str:
+        if row["premium_risk_veto"]:
+            flags = (premium_features.get(str(row["ts_code"])) or {}).get("risk_flags") or []
+            return "6000积分风险否决:" + ",".join(str(flag) for flag in flags)
+        if premium_features and row["premium_factor_coverage"] < config.env_float(
+            "MIN_PREMIUM_FACTOR_COVERAGE", 0.60
+        ):
+            return "6000积分个股因子覆盖不足"
         if not np.isfinite(row["circ_mv"]) or row["circ_mv"] < min_circ_mv:
             return "流通市值不足"
         if not np.isfinite(row["pe_ttm"]) or not (0 < row["pe_ttm"] < 300):
@@ -118,6 +140,9 @@ def rank_stocks(
     industry_excess: dict[str, float] | None = None,
     stock_evidence: dict[str, float] | None = None,
     target_industries: set[str] | None = None,
+    allowed_codes: set[str] | None = None,
+    premium_features: dict[str, dict[str, Any]] | None = None,
+    output_limit: int | None = None,
 ) -> list[dict[str, Any]]:
     """返回按评分降序的候选列表（含硬过滤信息）。"""
     primary_max = config.env_int("PRIMARY_MAX", 3)
@@ -127,8 +152,16 @@ def rank_stocks(
     primary_rule_min = config.env_float("PRIMARY_RULE_MIN_SCORE", 75.0)
     industry_excess = industry_excess or {}
     stock_evidence = stock_evidence or {}
+    premium_features = premium_features or {}
 
-    passed = hard_eligible_stocks(bars, basics, stocks, trade_date)
+    passed = hard_eligible_stocks(
+        bars,
+        basics,
+        stocks,
+        trade_date,
+        allowed_codes=allowed_codes,
+        premium_features=premium_features,
+    )
     if passed.empty:
         return []
 
@@ -142,7 +175,7 @@ def rank_stocks(
     passed["turn_rank"] = pct_rank(passed["turnover_rate"])
     passed["amt_rank"] = pct_rank(passed["amount_20d"])
     passed["evidence_score"] = passed["symbol"].map(stock_evidence).fillna(0.0)
-    passed["score"] = (
+    passed["base_score"] = (
         passed["ret5_rank"] * 0.25
         + passed["ret20_rank"] * 0.15
         + passed["pct_rank"] * 0.20
@@ -151,22 +184,31 @@ def rank_stocks(
         + (100.0 - passed["turn_rank"]) * 0.10
         + passed["evidence_score"] * 10.0
     ).round(1)
+    if premium_features:
+        passed["score"] = (
+            passed["base_score"] * 0.55 + passed["premium_score"] * 0.45
+        ).round(1)
+    else:
+        passed["score"] = passed["base_score"]
     passed = passed.sort_values("score", ascending=False)
 
     out = []
     primary_count = 0
     watch_count = 0
     primary_industry_counts: dict[str, int] = {}
-    # 常规榜单保留全局前列；目标板块的全部硬过滤合格股票也进入形态筛选，
-    # 避免先按全市场分数截断后再筛目标板块造成系统性漏选。
-    selection = passed.head(primary_max + watch_max + risk_control_max)
-    target_set = set(target_industries or set())
-    if target_set:
-        selection = pd.concat(
-            [selection, passed[passed["industry"].isin(target_set)]],
-            ignore_index=False,
-        ).drop_duplicates(subset=["ts_code"])
-        selection = selection.sort_values("score", ascending=False)
+    if output_limit is not None:
+        selection = passed.head(output_limit)
+    else:
+        # 常规榜单保留全局前列；目标板块的全部硬过滤合格股票也进入形态筛选，
+        # 避免先按全市场分数截断后再筛目标板块造成系统性漏选。
+        selection = passed.head(primary_max + watch_max + risk_control_max)
+        target_set = set(target_industries or set())
+        if target_set:
+            selection = pd.concat(
+                [selection, passed[passed["industry"].isin(target_set)]],
+                ignore_index=False,
+            ).drop_duplicates(subset=["ts_code"])
+            selection = selection.sort_values("score", ascending=False)
     for _, row in selection.iterrows():
         industry = str(row["industry"] or "")
         if (
@@ -196,6 +238,8 @@ def rank_stocks(
                 "turnover_rate": round(float(row["turnover_rate"]), 2) if row["turnover_rate"] is not None else None,
                 "amount_20d_yi": round(float(row["amount_20d"]) / 1e8, 2) if row["amount_20d"] is not None else None,
                 "evidence_score": round(float(row["evidence_score"]), 4),
+                "premium_score": round(float(row["premium_score"]), 2),
+                "premium_features": premium_features.get(str(row["ts_code"]), {}),
                 "role": _stock_role(row),
                 "tier": tier,
                 "confirm_conditions": "高开≤3%且开盘15分钟站稳分时均线",

@@ -30,10 +30,36 @@ def _candidate_row(c: dict[str, Any], route_names: dict[str, str]) -> str:
             f"压{_esc(pattern.get('resistance2', '—'))}"
             f"（空间{_esc(pattern.get('room_to_resistance_pct', '—'))}%）"
         )
+    elif c.get("stop_loss_price"):
+        key_levels = (
+            f"参考{_esc(c.get('reference_close'))}｜"
+            f"止损{_esc(c.get('stop_loss_price'))}"
+        )
+    premium = c.get("premium_features") or {}
+    factor_summary = "｜".join(
+        [
+            f"热{_esc(premium.get('hot_score', '—'))}",
+            f"流{_esc(premium.get('flow_score', '—'))}",
+            f"板{_esc(premium.get('board_score', '—'))}",
+            f"题{_esc(premium.get('theme_score', '—'))}",
+            f"技{_esc(premium.get('technical_score', '—'))}",
+        ]
+    )
+    confidence = (
+        f"上涨概率 {_pct(c.get('selection_probability', c.get('prob_positive')))}｜"
+        f"因子覆盖 {_pct(premium.get('factor_coverage'))}"
+    )
+    intent = c.get("stock_intent") or {}
+    intent_summary = (
+        f"{_esc(intent.get('stage', '—'))}｜情绪{_esc(intent.get('sentiment', '—'))}｜"
+        f"一日游{_pct(intent.get('one_day_risk'))}｜持续性{_pct(intent.get('catalyst_persistence'))}<br>"
+        f"{_esc(intent.get('rationale', ''))}"
+    )
     return (
         f"<tr><td>{_esc(c.get('name'))}</td><td>{_esc(c.get('ts_code'))}</td>"
         f"<td>{_esc(c.get('tier'))}</td><td>{_esc(c.get('role'))}</td>"
-        f"<td>{_esc(c.get('score'))}</td><td>{_esc(c.get('industry'))}</td>"
+        f"<td>{_esc(c.get('score'))}</td><td>{confidence}</td><td>{intent_summary}</td><td>{factor_summary}</td>"
+        f"<td>{_esc(c.get('industry'))}</td>"
         f"<td>{_esc(route_label)}</td><td>{key_levels}</td>"
         f"<td>{_esc(c.get('action', ''))}</td>"
         f"<td>{_esc(c.get('confirm_conditions'))}</td></tr>"
@@ -48,6 +74,8 @@ def generate_report(payload: dict[str, Any], output: Path) -> Path:
     scenarios = payload.get("scenarios") or []
     sectors = payload.get("sectors") or []
     candidates = payload.get("candidates") or []
+    continuations = payload.get("continuations") or []
+    tracking_evaluation = payload.get("tracking_evaluation") or {}
     intent_sequence = payload.get("intent_sequence") or []
     intent_forecast = payload.get("intent_forecast") or {}
     target_sectors = payload.get("target_sectors") or []
@@ -85,6 +113,12 @@ def generate_report(payload: dict[str, Any], output: Path) -> Path:
         f"{_esc(str(item.get('trade_date', ''))[-4:])} {_esc(item.get('label', ''))}"
         for item in intent_sequence[-5:]
     ) or "数据不足"
+    latest_intent = intent_sequence[-1] if intent_sequence else {}
+    behavior_proxies = (
+        f"散户情绪代理 {_esc(latest_intent.get('retail_sentiment_proxy', '—'))} · "
+        f"追涨拥挤风险 {_esc(latest_intent.get('crowding_risk_proxy', '—'))} · "
+        f"量化收割风险代理 {_esc(latest_intent.get('quant_harvest_risk_proxy', '—'))}"
+    )
     route_names = {
         "just_started": "刚启动",
         "controlled_pullback": "可控回踩",
@@ -97,6 +131,7 @@ def generate_report(payload: dict[str, Any], output: Path) -> Path:
         f"<p>预判：<b>{_esc(intent_forecast.get('label', '—'))}</b>"
         f"（置信度 {_pct(intent_forecast.get('confidence', 0))}）· "
         f"目标板块：{_esc('、'.join(target_sectors) or '防守 / 无明确目标')}</p>"
+        f"<p>{behavior_proxies}</p>"
         f"<p>{_esc(intent_forecast.get('reason', ''))}</p></div>"
     )
     last_signals = (
@@ -156,7 +191,17 @@ def generate_report(payload: dict[str, Any], output: Path) -> Path:
             for c in candidates[:10]
         )
     else:
-        candidate_rows = "<tr><td colspan='10'>无合格候选（合法空仓）</td></tr>"
+        candidate_rows = "<tr><td colspan='13'>无合格候选（合法空仓）</td></tr>"
+    continuation_rows = "".join(
+        f"<tr><td>{_esc(item.get('ts_code'))}</td>"
+        f"<td>{_esc('继续涨' if item.get('direction') == 'rise' else '不涨')}</td>"
+        f"<td>{_pct(item.get('probability'))}</td>"
+        f"<td>{_esc(item.get('reference_close'))}</td>"
+        f"<td>{_esc(item.get('stop_loss_price'))}</td>"
+        f"<td>{_esc(item.get('consecutive_up_days'))}</td>"
+        f"<td>{_esc(item.get('reason'))}</td></tr>"
+        for item in continuations
+    ) or "<tr><td colspan='7'>当前没有未触发止损的续跟踪标的</td></tr>"
     fact_lines = "".join(f"<li>{_esc(f)}</li>" for f in (facts.get("summary") or [])[:6]) or "<li>无</li>"
     hypotheses = "".join(
         f"<li><b>{_esc(item.get('name'))}</b>（证据分 {_esc(item.get('score'))}）<br>"
@@ -280,8 +325,11 @@ th{{color:#8fa0bd;font-weight:500}}
 	{lhb_card}
 <div class="card"><h2>板块职责与相对强弱 Top8</h2>
 <table><tr><th>行业</th><th>职责</th><th>评分</th><th>当日</th><th>20日超额</th></tr>{sector_rows}</table></div>
-<div class="card"><h2>条件候选（未触发即不成交）</h2>
-<table><tr><th>名称</th><th>代码</th><th>层级</th><th>角色</th><th>评分</th><th>行业</th><th>形态</th><th>支撑/压力</th><th>操作</th><th>确认条件</th></tr>{candidate_rows}</table></div>
+<div class="card"><h2>同花顺实时热榜新推荐（最多 5 支，未触发即不成交）</h2>
+<table><tr><th>名称</th><th>代码</th><th>层级</th><th>角色</th><th>评分</th><th>概率/覆盖</th><th>个股意图/一日游</th><th>高级因子</th><th>行业</th><th>形态</th><th>支撑/压力</th><th>操作</th><th>确认条件</th></tr>{candidate_rows}</table></div>
+<div class="card"><h2>历史正确/观察标的续跟踪</h2>
+<p>今日兑现 {_esc(tracking_evaluation.get('evaluated', 0))} 支 · 判断正确 {_esc(tracking_evaluation.get('correct_predictions', 0))} · 判断错误 {_esc(tracking_evaluation.get('wrong_predictions', 0))} · 触发止损 {_esc(tracking_evaluation.get('stopped', 0))}</p>
+<table><tr><th>代码</th><th>次日判断</th><th>概率</th><th>参考价</th><th>止损</th><th>连续上涨</th><th>依据</th></tr>{continuation_rows}</table></div>
 <div class="card"><h2>政策/公告事实要点</h2><ul>{fact_lines}</ul></div>
 	<div class="foot">本系统只生成研究与概率推演，不构成投资建议；不自动下单。<br>
 	“主力/操盘行为”是基于可见证据的竞争性假设，不代表已确认存在单一操盘主体。<br>

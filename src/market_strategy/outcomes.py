@@ -13,6 +13,7 @@ from .storage import Storage
 
 def track_outcomes(storage: Storage, max_data_date: str) -> dict:
     replay = run_replay(storage, storage.pending_replays(max_data_date))
+    entry_resolution = storage.resolve_pending_tracking_entries(max_data_date)
     pending = storage.pending_outcomes(max_data_date)
     if not pending:
         return {
@@ -20,6 +21,7 @@ def track_outcomes(storage: Storage, max_data_date: str) -> dict:
             "pending": 0,
             "summary": storage.outcome_summary(),
             "replay": replay,
+            "entry_resolution": entry_resolution,
         }
     tracked = 0
     industry_of = _industry_of(storage)
@@ -104,6 +106,7 @@ def track_outcomes(storage: Storage, max_data_date: str) -> dict:
         "pending": len(pending) - tracked,
         "summary": storage.outcome_summary(),
         "replay": replay,
+        "entry_resolution": entry_resolution,
     }
 
 

@@ -219,6 +219,72 @@ CREATE TABLE IF NOT EXISTS evidence_snapshot (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS hot_rank_snapshot (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER NOT NULL UNIQUE,
+  trade_date TEXT NOT NULL,
+  captured_at TEXT NOT NULL,
+  rank_time TEXT NOT NULL,
+  source TEXT NOT NULL,
+  item_count INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_hot_rank_trade ON hot_rank_snapshot(trade_date, rank_time);
+
+CREATE TABLE IF NOT EXISTS hot_rank_item (
+  snapshot_id INTEGER NOT NULL,
+  ts_code TEXT NOT NULL,
+  ts_name TEXT,
+  rank INTEGER NOT NULL,
+  pct_change REAL,
+  current_price REAL,
+  concept TEXT,
+  rank_reason TEXT,
+  hot REAL,
+  PRIMARY KEY (snapshot_id, ts_code),
+  UNIQUE (snapshot_id, rank)
+);
+CREATE INDEX IF NOT EXISTS idx_hot_rank_item_code ON hot_rank_item(ts_code);
+
+CREATE TABLE IF NOT EXISTS historical_hot_rank_snapshot (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  trade_date TEXT NOT NULL,
+  captured_at TEXT NOT NULL,
+  rank_time TEXT NOT NULL,
+  source TEXT NOT NULL,
+  item_count INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(trade_date, rank_time, source)
+);
+
+CREATE TABLE IF NOT EXISTS historical_hot_rank_item (
+  snapshot_id INTEGER NOT NULL,
+  ts_code TEXT NOT NULL,
+  ts_name TEXT,
+  rank INTEGER NOT NULL,
+  pct_change REAL,
+  current_price REAL,
+  concept TEXT,
+  rank_reason TEXT,
+  hot REAL,
+  PRIMARY KEY (snapshot_id, ts_code),
+  UNIQUE (snapshot_id, rank)
+);
+CREATE INDEX IF NOT EXISTS idx_historical_hot_trade ON historical_hot_rank_snapshot(trade_date, rank_time);
+CREATE INDEX IF NOT EXISTS idx_historical_hot_code ON historical_hot_rank_item(ts_code);
+
+CREATE TABLE IF NOT EXISTS feature_snapshot (
+  run_id INTEGER NOT NULL,
+  dataset_key TEXT NOT NULL,
+  trade_date TEXT NOT NULL,
+  as_of TEXT NOT NULL,
+  row_count INTEGER NOT NULL,
+  payload TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (run_id, dataset_key)
+);
+CREATE INDEX IF NOT EXISTS idx_feature_snapshot_trade ON feature_snapshot(trade_date, dataset_key);
+
 CREATE TABLE IF NOT EXISTS candidate_outcome (
   prediction_id INTEGER PRIMARY KEY,
   ts_code TEXT NOT NULL,
@@ -248,6 +314,47 @@ CREATE TABLE IF NOT EXISTS execution_replay (
   source TEXT,
   created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS tracking_position (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts_code TEXT NOT NULL UNIQUE,
+  origin_prediction_id INTEGER NOT NULL,
+  opened_for_trade_date TEXT NOT NULL,
+  status TEXT NOT NULL,
+  reference_price REAL NOT NULL,
+  entry_price REAL,
+  entry_trade_date TEXT,
+  activated_at TEXT,
+  entry_alerted_at TEXT,
+  entry_alert_error TEXT,
+  stop_price REAL NOT NULL,
+  peak_close REAL NOT NULL,
+  last_prediction_date TEXT,
+  last_evaluated_date TEXT,
+  consecutive_up_days INTEGER NOT NULL DEFAULT 0,
+  correct_predictions INTEGER NOT NULL DEFAULT 0,
+  wrong_predictions INTEGER NOT NULL DEFAULT 0,
+  close_reason TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tracking_status ON tracking_position(status, ts_code);
+
+CREATE TABLE IF NOT EXISTS tracking_result (
+  prediction_id INTEGER PRIMARY KEY,
+  tracking_id INTEGER NOT NULL,
+  ts_code TEXT NOT NULL,
+  trade_date TEXT NOT NULL,
+  predicted_direction TEXT NOT NULL,
+  actual_direction TEXT NOT NULL,
+  ret_close_to_close REAL,
+  stop_hit INTEGER NOT NULL,
+  low_price REAL,
+  close_price REAL,
+  verdict TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tracking_result_trade ON tracking_result(trade_date, ts_code);
 
 CREATE TABLE IF NOT EXISTS train_experiment (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -305,6 +412,20 @@ class Storage:
         }
         if "plan_type" not in replay_columns:
             self._conn.execute("ALTER TABLE execution_replay ADD COLUMN plan_type TEXT")
+        tracking_columns = {
+            str(row[1]) for row in self._conn.execute("PRAGMA table_info(tracking_position)").fetchall()
+        }
+        for name, definition in (
+            ("entry_price", "REAL"),
+            ("entry_trade_date", "TEXT"),
+            ("activated_at", "TEXT"),
+            ("entry_alerted_at", "TEXT"),
+            ("entry_alert_error", "TEXT"),
+        ):
+            if name not in tracking_columns:
+                self._conn.execute(
+                    f"ALTER TABLE tracking_position ADD COLUMN {name} {definition}"
+                )
 
     def close(self) -> None:
         self._conn.close()
@@ -895,10 +1016,10 @@ class Storage:
         entity: str,
         payload: dict,
         is_formal: bool = False,
-    ) -> None:
+    ) -> int:
         import json
 
-        self._conn.execute(
+        cursor = self._conn.execute(
             """
             INSERT INTO prediction_log(
               run_id, trade_date, decision_time, information_cutoff,
@@ -917,6 +1038,355 @@ class Storage:
             ),
         )
         self._conn.commit()
+        return int(cursor.lastrowid)
+
+    def open_tracking_position(
+        self,
+        *,
+        origin_prediction_id: int,
+        ts_code: str,
+        opened_for_trade_date: str,
+        reference_price: float,
+        stop_price: float,
+    ) -> int:
+        now = _now()
+        self._conn.execute(
+            """
+            INSERT INTO tracking_position(
+              ts_code, origin_prediction_id, opened_for_trade_date, status,
+              reference_price, stop_price, peak_close, last_prediction_date,
+              created_at, updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(ts_code) DO UPDATE SET
+              origin_prediction_id=excluded.origin_prediction_id,
+              opened_for_trade_date=excluded.opened_for_trade_date,
+              status='active', reference_price=excluded.reference_price,
+              stop_price=excluded.stop_price, peak_close=excluded.peak_close,
+              last_prediction_date=excluded.last_prediction_date,
+              last_evaluated_date=NULL, consecutive_up_days=0,
+              correct_predictions=0, wrong_predictions=0, close_reason=NULL,
+              updated_at=excluded.updated_at
+            """,
+            (
+                ts_code, origin_prediction_id, opened_for_trade_date, "active",
+                reference_price, stop_price, reference_price, opened_for_trade_date,
+                now, now,
+            ),
+        )
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT id FROM tracking_position WHERE ts_code=?", (ts_code,)
+        ).fetchone()
+        return int(row["id"])
+
+    def create_pending_tracking_position(
+        self,
+        *,
+        origin_prediction_id: int,
+        ts_code: str,
+        opened_for_trade_date: str,
+        reference_price: float,
+        stop_price: float,
+    ) -> int:
+        """记录待确认入场的正式推荐；未触发前不得参与续跟踪。"""
+        tracking_id = self.open_tracking_position(
+            origin_prediction_id=origin_prediction_id,
+            ts_code=ts_code,
+            opened_for_trade_date=opened_for_trade_date,
+            reference_price=reference_price,
+            stop_price=stop_price,
+        )
+        self._conn.execute(
+            """
+            UPDATE tracking_position
+            SET status='pending_entry', entry_price=NULL, entry_trade_date=NULL,
+                activated_at=NULL, entry_alerted_at=NULL, entry_alert_error=NULL,
+                updated_at=?
+            WHERE id=?
+            """,
+            (_now(), tracking_id),
+        )
+        self._conn.commit()
+        return tracking_id
+
+    def resolve_pending_tracking_entries(self, through_date: str) -> dict[str, int]:
+        """根据分钟回放把待入场推荐激活或关闭。"""
+        rows = self._conn.execute(
+            """
+            SELECT t.id, t.reference_price, t.stop_price, t.opened_for_trade_date,
+                   r.verdict, r.entry_price
+            FROM tracking_position t
+            JOIN execution_replay r ON r.prediction_id=t.origin_prediction_id
+            WHERE t.status='pending_entry' AND t.opened_for_trade_date<=?
+              AND r.verdict!='no_data'
+            ORDER BY t.id
+            """,
+            (through_date,),
+        ).fetchall()
+        result = {"activated": 0, "not_triggered": 0}
+        for row in rows:
+            if str(row["verdict"]) == "filled" and float(row["entry_price"] or 0.0) > 0:
+                entry_price = float(row["entry_price"])
+                reference_price = float(row["reference_price"] or 0.0)
+                original_stop = float(row["stop_price"] or 0.0)
+                stop_ratio = original_stop / reference_price if reference_price > 0 else 0.94
+                adjusted_stop = round(entry_price * min(0.99, max(0.85, stop_ratio)), 2)
+                self._conn.execute(
+                    """
+                    UPDATE tracking_position
+                    SET status='active', entry_price=?, entry_trade_date=?, activated_at=?,
+                        reference_price=?, stop_price=?, peak_close=?, last_prediction_date=NULL,
+                        last_evaluated_date=NULL, updated_at=?
+                    WHERE id=?
+                    """,
+                    (
+                        entry_price,
+                        str(row["opened_for_trade_date"]),
+                        _now(),
+                        entry_price,
+                        adjusted_stop,
+                        entry_price,
+                        _now(),
+                        int(row["id"]),
+                    ),
+                )
+                result["activated"] += 1
+            else:
+                self._conn.execute(
+                    """
+                    UPDATE tracking_position
+                    SET status='closed', close_reason='entry_not_triggered', updated_at=?
+                    WHERE id=?
+                    """,
+                    (_now(), int(row["id"])),
+                )
+                result["not_triggered"] += 1
+        self._conn.commit()
+        return result
+
+    def active_tracking_positions(self) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM tracking_position WHERE status='active' ORDER BY id"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def active_tracking_codes(self) -> set[str]:
+        return {str(row["ts_code"]) for row in self.active_tracking_positions()}
+
+    def tracked_or_pending_codes(self) -> set[str]:
+        rows = self._conn.execute(
+            "SELECT ts_code FROM tracking_position WHERE status IN ('active', 'pending_entry')"
+        ).fetchall()
+        return {str(row["ts_code"]) for row in rows}
+
+    def pending_entry_predictions(self, trade_date: str) -> list[dict]:
+        rows = self._conn.execute(
+            """
+            SELECT p.id, p.trade_date, p.entity, p.payload, t.id AS tracking_id
+            FROM tracking_position t
+            JOIN prediction_log p ON p.id=t.origin_prediction_id
+            WHERE t.status='pending_entry' AND t.opened_for_trade_date=?
+            ORDER BY t.id
+            """,
+            (trade_date,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def unalerted_entries(self, trade_date: str) -> list[dict]:
+        rows = self._conn.execute(
+            """
+            SELECT t.*, COALESCE(s.name, '') AS name, r.plan_type,
+                   r.high_open_pct, r.vwap_15m, r.close_15m, r.reason, r.source,
+                   p.payload
+            FROM tracking_position t
+            JOIN prediction_log p ON p.id=t.origin_prediction_id
+            LEFT JOIN stock_basic s ON s.ts_code=t.ts_code
+            LEFT JOIN execution_replay r ON r.prediction_id=t.origin_prediction_id
+            WHERE t.status='active' AND t.entry_trade_date=?
+              AND t.entry_alerted_at IS NULL
+            ORDER BY t.id
+            """,
+            (trade_date,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_entry_alert(self, tracking_id: int, *, error: str = "") -> None:
+        if error:
+            self._conn.execute(
+                "UPDATE tracking_position SET entry_alert_error=?, updated_at=? WHERE id=?",
+                (error[:500], _now(), tracking_id),
+            )
+        else:
+            self._conn.execute(
+                """
+                UPDATE tracking_position
+                SET entry_alerted_at=?, entry_alert_error=NULL, updated_at=?
+                WHERE id=?
+                """,
+                (_now(), _now(), tracking_id),
+            )
+        self._conn.commit()
+
+    def hot_rank_appearances(
+        self,
+        codes: list[str],
+        through_date: str,
+        *,
+        lookback_days: int = 10,
+    ) -> dict[str, int]:
+        if not codes:
+            return {}
+        placeholders = ",".join("?" for _ in codes)
+        rows = self._conn.execute(
+            f"""
+            WITH appearances AS (
+              SELECT s.trade_date, i.ts_code
+              FROM hot_rank_snapshot s JOIN hot_rank_item i ON i.snapshot_id=s.id
+              WHERE s.trade_date<=? AND i.ts_code IN ({placeholders})
+              UNION
+              SELECT s.trade_date, i.ts_code
+              FROM historical_hot_rank_snapshot s
+              JOIN historical_hot_rank_item i ON i.snapshot_id=s.id
+              WHERE s.trade_date<=? AND i.ts_code IN ({placeholders})
+            ), recent_dates AS (
+              SELECT DISTINCT trade_date FROM appearances ORDER BY trade_date DESC LIMIT ?
+            )
+            SELECT ts_code, COUNT(DISTINCT trade_date) AS appearances
+            FROM appearances WHERE trade_date IN (SELECT trade_date FROM recent_dates)
+            GROUP BY ts_code
+            """,
+            [through_date, *codes, through_date, *codes, lookback_days],
+        ).fetchall()
+        return {str(row["ts_code"]): int(row["appearances"]) for row in rows}
+
+    def tracking_decisions_for_date(self, trade_date: str) -> list[dict]:
+        rows = self._conn.execute(
+            """
+            SELECT p.id AS prediction_id, p.entity AS ts_code, p.payload,
+                   t.id AS tracking_id, t.stop_price, t.peak_close,
+                   t.correct_predictions, t.wrong_predictions,
+                   t.consecutive_up_days
+            FROM prediction_log p
+            JOIN tracking_position t ON t.ts_code=p.entity
+            WHERE p.trade_date=? AND p.is_formal=1
+              AND p.category IN ('candidate', 'continuation')
+              AND t.status='active'
+              AND p.id IN (
+                SELECT MAX(id) FROM prediction_log
+                WHERE trade_date=? AND is_formal=1
+                  AND category IN ('candidate', 'continuation')
+                GROUP BY entity
+              )
+              AND p.id NOT IN (SELECT prediction_id FROM tracking_result)
+            ORDER BY p.id
+            """,
+            (trade_date, trade_date),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def pending_tracking_dates(self, through_date: str) -> list[str]:
+        rows = self._conn.execute(
+            """
+            SELECT DISTINCT p.trade_date
+            FROM prediction_log p
+            JOIN tracking_position t ON t.ts_code=p.entity
+            WHERE p.trade_date<=? AND p.is_formal=1
+              AND p.category IN ('candidate', 'continuation')
+              AND t.status='active'
+              AND p.id NOT IN (SELECT prediction_id FROM tracking_result)
+            ORDER BY p.trade_date
+            """,
+            (through_date,),
+        ).fetchall()
+        return [str(row["trade_date"]) for row in rows]
+
+    def save_tracking_result(self, row: dict) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO tracking_result(
+              prediction_id, tracking_id, ts_code, trade_date, predicted_direction,
+              actual_direction, ret_close_to_close, stop_hit, low_price,
+              close_price, verdict, created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(prediction_id) DO UPDATE SET
+              actual_direction=excluded.actual_direction,
+              ret_close_to_close=excluded.ret_close_to_close,
+              stop_hit=excluded.stop_hit, low_price=excluded.low_price,
+              close_price=excluded.close_price, verdict=excluded.verdict,
+              created_at=excluded.created_at
+            """,
+            (
+                row["prediction_id"], row["tracking_id"], row["ts_code"], row["trade_date"],
+                row["predicted_direction"], row["actual_direction"],
+                row.get("ret_close_to_close"), int(bool(row.get("stop_hit"))),
+                row.get("low_price"), row.get("close_price"), row["verdict"],
+                _now(),
+            ),
+        )
+        self._conn.commit()
+
+    def update_tracking_after_result(
+        self,
+        tracking_id: int,
+        *,
+        trade_date: str,
+        close_price: float,
+        actual_rise: bool,
+        prediction_correct: bool,
+        stop_hit: bool,
+    ) -> None:
+        row = self._conn.execute(
+            "SELECT * FROM tracking_position WHERE id=?", (tracking_id,)
+        ).fetchone()
+        if row is None:
+            return
+        status = "stopped" if stop_hit else "active"
+        self._conn.execute(
+            """
+            UPDATE tracking_position SET
+              status=?, peak_close=?, last_evaluated_date=?,
+              consecutive_up_days=?, correct_predictions=?, wrong_predictions=?,
+              close_reason=?, updated_at=?
+            WHERE id=?
+            """,
+            (
+                status, max(float(row["peak_close"]), close_price), trade_date,
+                int(row["consecutive_up_days"]) + 1 if actual_rise else 0,
+                int(row["correct_predictions"]) + int(prediction_correct),
+                int(row["wrong_predictions"]) + int(not prediction_correct),
+                "stop_loss_hit" if stop_hit else None, _now(), tracking_id,
+            ),
+        )
+        self._conn.commit()
+
+    def update_tracking_prediction(
+        self, tracking_id: int, target_trade_date: str, stop_price: float
+    ) -> None:
+        self._conn.execute(
+            """
+            UPDATE tracking_position SET
+              last_prediction_date=?, stop_price=MAX(stop_price, ?), updated_at=?
+            WHERE id=? AND status='active'
+            """,
+            (target_trade_date, stop_price, _now(), tracking_id),
+        )
+        self._conn.commit()
+
+    def close_tracking_position(self, tracking_id: int, reason: str) -> None:
+        self._conn.execute(
+            """
+            UPDATE tracking_position SET status='closed', close_reason=?, updated_at=?
+            WHERE id=?
+            """,
+            (reason, _now(), tracking_id),
+        )
+        self._conn.commit()
+
+    def tracking_result(self, prediction_id: int) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM tracking_result WHERE prediction_id=?", (prediction_id,)
+        ).fetchone()
+        return dict(row) if row else None
 
     def save_evidence_snapshot(
         self,
@@ -944,6 +1414,225 @@ class Storage:
             ),
         )
         self._conn.commit()
+
+    def save_hot_rank_snapshot(
+        self,
+        run_id: int,
+        trade_date: str,
+        captured_at: str,
+        rank_time: str,
+        source: str,
+        items: list[dict],
+    ) -> int:
+        import json
+
+        with self._conn:
+            cursor = self._conn.execute(
+                """
+                INSERT INTO hot_rank_snapshot(
+                  run_id, trade_date, captured_at, rank_time, source,
+                  item_count, created_at)
+                VALUES(?,?,?,?,?,?,?)
+                """,
+                (
+                    run_id,
+                    trade_date,
+                    captured_at,
+                    rank_time,
+                    source,
+                    len(items),
+                    _now(),
+                ),
+            )
+            snapshot_id = int(cursor.lastrowid)
+            self._conn.executemany(
+                """
+                INSERT INTO hot_rank_item(
+                  snapshot_id, ts_code, ts_name, rank, pct_change,
+                  current_price, concept, rank_reason, hot)
+                VALUES(?,?,?,?,?,?,?,?,?)
+                """,
+                [
+                    (
+                        snapshot_id,
+                        str(item["ts_code"]),
+                        str(item.get("ts_name") or ""),
+                        int(item["rank"]),
+                        item.get("pct_change"),
+                        item.get("current_price"),
+                        json.dumps(
+                            _json_safe(item.get("concept")),
+                            ensure_ascii=False,
+                            allow_nan=False,
+                        ),
+                        str(item.get("rank_reason") or ""),
+                        item.get("hot"),
+                    )
+                    for item in items
+                ],
+            )
+        return snapshot_id
+
+    def hot_rank_snapshot_for_run(self, run_id: int) -> dict | None:
+        import json
+
+        snapshot = self._conn.execute(
+            "SELECT * FROM hot_rank_snapshot WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        if snapshot is None:
+            return None
+        items = self._conn.execute(
+            "SELECT * FROM hot_rank_item WHERE snapshot_id=? ORDER BY rank",
+            (snapshot["id"],),
+        ).fetchall()
+        result = dict(snapshot)
+        result["items"] = []
+        for row in items:
+            item = dict(row)
+            item["concept"] = json.loads(item["concept"] or "null")
+            result["items"].append(item)
+        return result
+
+    def save_historical_hot_rank_snapshot(
+        self,
+        *,
+        trade_date: str,
+        captured_at: str,
+        rank_time: str,
+        source: str,
+        items: list[dict],
+    ) -> int:
+        import json
+
+        with self._conn:
+            existing = self._conn.execute(
+                """
+                SELECT id FROM historical_hot_rank_snapshot
+                WHERE trade_date=? AND rank_time=? AND source=?
+                """,
+                (trade_date, rank_time, source),
+            ).fetchone()
+            if existing:
+                snapshot_id = int(existing["id"])
+                self._conn.execute(
+                    "DELETE FROM historical_hot_rank_item WHERE snapshot_id=?",
+                    (snapshot_id,),
+                )
+                self._conn.execute(
+                    """
+                    UPDATE historical_hot_rank_snapshot SET
+                      captured_at=?, item_count=?, created_at=? WHERE id=?
+                    """,
+                    (captured_at, len(items), _now(), snapshot_id),
+                )
+            else:
+                cursor = self._conn.execute(
+                    """
+                    INSERT INTO historical_hot_rank_snapshot(
+                      trade_date, captured_at, rank_time, source, item_count, created_at)
+                    VALUES(?,?,?,?,?,?)
+                    """,
+                    (trade_date, captured_at, rank_time, source, len(items), _now()),
+                )
+                snapshot_id = int(cursor.lastrowid)
+            self._conn.executemany(
+                """
+                INSERT INTO historical_hot_rank_item(
+                  snapshot_id, ts_code, ts_name, rank, pct_change,
+                  current_price, concept, rank_reason, hot)
+                VALUES(?,?,?,?,?,?,?,?,?)
+                """,
+                [
+                    (
+                        snapshot_id, str(item["ts_code"]),
+                        str(item.get("ts_name") or ""), int(item["rank"]),
+                        item.get("pct_change"), item.get("current_price"),
+                        json.dumps(_json_safe(item.get("concept")), ensure_ascii=False, allow_nan=False),
+                        str(item.get("rank_reason") or ""), item.get("hot"),
+                    )
+                    for item in items
+                ],
+            )
+        return snapshot_id
+
+    def historical_hot_rank_codes(self, trade_date: str) -> set[str]:
+        snapshot = self._conn.execute(
+            """
+            SELECT id FROM historical_hot_rank_snapshot
+            WHERE trade_date=? ORDER BY rank_time DESC, id DESC LIMIT 1
+            """,
+            (trade_date,),
+        ).fetchone()
+        if snapshot is None:
+            return set()
+        rows = self._conn.execute(
+            "SELECT ts_code FROM historical_hot_rank_item WHERE snapshot_id=?",
+            (snapshot["id"],),
+        ).fetchall()
+        return {str(row["ts_code"]) for row in rows}
+
+    def historical_hot_rank_map(
+        self, start_date: str, end_date: str
+    ) -> dict[str, set[str]]:
+        dates = self._conn.execute(
+            """
+            SELECT DISTINCT trade_date FROM historical_hot_rank_snapshot
+            WHERE trade_date BETWEEN ? AND ? ORDER BY trade_date
+            """,
+            (start_date, end_date),
+        ).fetchall()
+        return {
+            str(row["trade_date"]): self.historical_hot_rank_codes(str(row["trade_date"]))
+            for row in dates
+        }
+
+    def save_feature_snapshot(
+        self,
+        *,
+        run_id: int,
+        trade_date: str,
+        dataset_key: str,
+        as_of: str,
+        payload: dict,
+    ) -> None:
+        import json
+
+        row_count = sum(
+            len(value)
+            for value in (payload.get("datasets") or {}).values()
+            if isinstance(value, list)
+        )
+        self._conn.execute(
+            """
+            INSERT INTO feature_snapshot(
+              run_id, dataset_key, trade_date, as_of, row_count, payload, created_at)
+            VALUES(?,?,?,?,?,?,?)
+            """,
+            (
+                run_id,
+                dataset_key,
+                trade_date,
+                as_of,
+                row_count,
+                json.dumps(_json_safe(payload), ensure_ascii=False, allow_nan=False),
+                _now(),
+            ),
+        )
+        self._conn.commit()
+
+    def feature_snapshot_for_run(self, run_id: int, dataset_key: str) -> dict | None:
+        import json
+
+        row = self._conn.execute(
+            "SELECT * FROM feature_snapshot WHERE run_id=? AND dataset_key=?",
+            (run_id, dataset_key),
+        ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["payload"] = json.loads(result["payload"])
+        return result
 
     def pending_outcomes(self, max_data_date: str) -> list[dict]:
         rows = self._conn.execute(

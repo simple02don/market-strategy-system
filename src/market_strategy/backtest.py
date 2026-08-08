@@ -38,6 +38,38 @@ def _split(frame: pd.DataFrame, test_days: int) -> tuple[pd.DataFrame, pd.DataFr
     return frame[frame["date"] < split_date], frame[frame["date"] >= split_date]
 
 
+def _filter_to_frozen_hot_rank(
+    storage: Storage, frame: pd.DataFrame
+) -> tuple[pd.DataFrame, dict]:
+    """回测只接受历史冻结热榜，不允许退化为当前实时热榜。"""
+    if frame.empty:
+        return frame, {"mode": "frozen_fixture_only", "snapshot_days": 0, "rows": 0}
+    start_date = str(frame["date"].min())
+    end_date = str(frame["date"].max())
+    hot_map = storage.historical_hot_rank_map(start_date, end_date)
+    if not hot_map:
+        return frame.iloc[0:0].copy(), {
+            "mode": "frozen_fixture_only",
+            "status": "unavailable",
+            "reason": "no_historical_hot_rank_fixture",
+            "snapshot_days": 0,
+            "rows": 0,
+        }
+    mask = [
+        str(code) in hot_map.get(str(trade_date), set())
+        for trade_date, code in zip(frame["date"], frame["ts_code"])
+    ]
+    filtered = frame.loc[mask].copy()
+    return filtered, {
+        "mode": "frozen_fixture_only",
+        "status": "ok",
+        "snapshot_days": len(hot_map),
+        "rows": int(len(filtered)),
+        "start_date": min(hot_map),
+        "end_date": max(hot_map),
+    }
+
+
 def run_backtest(
     storage: Storage,
     trade_date: str,
@@ -55,6 +87,7 @@ def run_backtest(
         days=train_days + test_days + 20,
         min_amount=config.env_float("MIN_AMOUNT_20D", 1.5e8),
     )
+    stock, hot_rank_status = _filter_to_frozen_hot_rank(storage, stock)
     result: dict = {
         "trade_date": trade_date,
         "ran_at": now_str(),
@@ -63,6 +96,7 @@ def run_backtest(
             "test_days": test_days,
             "one_way_cost_bps": cost_bps,
         },
+        "hot_rank_backtest": hot_rank_status,
     }
 
     # ---- 市场方向 ----

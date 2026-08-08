@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -11,6 +12,11 @@ import pandas as pd
 
 from . import config
 from .calendar import TradingCalendar
+from .continuation import (
+    build_continuation_predictions,
+    evaluate_tracking_through,
+    select_fresh_recommendations,
+)
 from .features.materialize import (
     build_market_features,
     build_sector_features,
@@ -28,6 +34,12 @@ from .models.stock_pattern import (
     defensive_universe,
     merge_defensive_candidates,
 )
+from .models.stock_intent import analyze_continuation_intents, analyze_stock_candidates
+from .hot_rank import capture_hot_rank
+from .premium_signals import (
+    build_candidate_premium_features,
+    capture_six_thousand_signals,
+)
 from .models.inference import (
     component_approved,
     infer_market,
@@ -37,6 +49,7 @@ from .models.inference import (
 )
 from .nlp.facts import extract_facts
 from .nlp.impact import assess_news_impact
+from .outcomes import track_outcomes
 from .providers.news_sources import NewsCollector
 from .providers.index_fallback import fetch_index_daily
 from .providers.shared_cache import SharedCacheReader
@@ -49,16 +62,37 @@ from .timeutil import now_cst, now_str
 
 def _git_commit() -> str:
     try:
-        return (
+        head = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(config.ROOT),
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        ).decode().strip()[:12]
+        status = subprocess.check_output(
+            ["git", "status", "--porcelain"],
+            cwd=str(config.ROOT),
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        if not status.strip():
+            return head
+        digest = hashlib.sha256(status)
+        digest.update(
             subprocess.check_output(
-                ["git", "rev-parse", "HEAD"],
+                ["git", "diff", "--binary", "HEAD"],
                 cwd=str(config.ROOT),
                 stderr=subprocess.DEVNULL,
-                timeout=5,
+                timeout=10,
             )
-            .decode()
-            .strip()[:12]
         )
+        for line in status.decode(errors="replace").splitlines():
+            if not line.startswith("?? "):
+                continue
+            path = config.ROOT / line[3:]
+            if path.is_file():
+                digest.update(line[3:].encode())
+                digest.update(path.read_bytes())
+        return f"{head}+dirty.{digest.hexdigest()[:10]}"
     except Exception:  # noqa: BLE001
         return "unknown"
 
@@ -249,6 +283,14 @@ class NightlyPipeline:
         dataset_version = ""
         model_version = "rule_v1"
         try:
+            captured_at = now_str()
+            hot_snapshot = capture_hot_rank(
+                self.storage,
+                self.provider,
+                run_id,
+                latest_str,
+                captured_at,
+            )
             self.update_stock_pool()
             try:
                 update_result = self.update_market_data(latest_str)
@@ -259,9 +301,60 @@ class NightlyPipeline:
                     update_result["requested_trade_date"] = latest_str
                     update_result["data_fallback"] = str(exc)
                     latest_str = fallback_td
+                    if str(hot_snapshot.get("trade_date") or "") != latest_str:
+                        raise RuntimeError("行情降级日期与启动时冻结热榜日期不一致，拒绝混用数据")
                 else:
                     raise
             dataset_version = str(update_result.get("dataset_version") or "")
+            update_result["outcomes"] = track_outcomes(self.storage, latest_str)
+            update_result["tracking_evaluation"] = evaluate_tracking_through(
+                self.storage, latest_str
+            )
+            premium_bundle = capture_six_thousand_signals(
+                self.provider,
+                latest_str,
+                hot_snapshot["items"],
+                extra_candidate_codes=self.storage.tracked_or_pending_codes(),
+            )
+            self.storage.save_feature_snapshot(
+                run_id=run_id,
+                trade_date=latest_str,
+                dataset_key="six_thousand_bundle",
+                as_of=captured_at,
+                payload=premium_bundle,
+            )
+            premium_features = build_candidate_premium_features(premium_bundle)
+            update_result["hot_rank"] = {
+                "count": len(hot_snapshot["items"]),
+                "rank_time": hot_snapshot["rank_time"],
+                "age_hours": hot_snapshot.get("age_hours"),
+                "source": hot_snapshot["source"],
+            }
+            update_result["six_thousand"] = {
+                "apis": len(premium_bundle["inventory"]),
+                "row_counts": premium_bundle["row_counts"],
+                "candidate_features": len(premium_features),
+                "hot_candidate_features": len(
+                    {
+                        str(item["ts_code"])
+                        for item in hot_snapshot["items"]
+                        if str(item["ts_code"]) in premium_features
+                    }
+                ),
+                "hot_candidates_covered": sum(
+                    float(premium_features.get(str(item["ts_code"]), {}).get("factor_coverage", 0.0))
+                    >= config.env_float("MIN_PREMIUM_FACTOR_COVERAGE", 0.60)
+                    for item in hot_snapshot["items"]
+                ),
+                "average_factor_coverage": round(
+                    sum(
+                        float(premium_features.get(str(item["ts_code"]), {}).get("factor_coverage", 0.0))
+                        for item in hot_snapshot["items"]
+                    )
+                    / max(1, len(hot_snapshot["items"])),
+                    4,
+                ),
+            }
             information_cutoff = now_str()
             result = self._compose(
                 next_day_str,
@@ -270,6 +363,8 @@ class NightlyPipeline:
                 model_version,
                 information_cutoff=information_cutoff,
                 update_result=update_result,
+                hot_snapshot=hot_snapshot,
+                premium_features=premium_features,
             )
             payload = result["payload"]
             decision_time = now_str()
@@ -362,7 +457,16 @@ class NightlyPipeline:
         *,
         information_cutoff: str,
         update_result: dict[str, Any],
+        hot_snapshot: dict[str, Any] | None = None,
+        premium_features: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        hot_enforced = hot_snapshot is not None
+        hot_snapshot = hot_snapshot or {
+            "items": [],
+            "rank_time": "",
+            "source": "compatibility_only",
+        }
+        premium_features = premium_features or {}
         news = self._collect_news(latest_str, information_cutoff)
         pit_items, _pit_stats = filter_pit_items(
             news["items"],
@@ -455,6 +559,13 @@ class NightlyPipeline:
             industry_excess=industry_excess,
             stock_evidence=evidence.get("stock_scores") or {},
             target_industries=set(target_sectors),
+            allowed_codes=(
+                {str(item["ts_code"]) for item in hot_snapshot["items"]}
+                if hot_enforced
+                else None
+            ),
+            premium_features=premium_features,
+            output_limit=100 if hot_enforced else None,
         )
         model_version_effective = "rule_v1"
         models = load_models()
@@ -499,7 +610,27 @@ class NightlyPipeline:
         }
         defensive_mode = not target_sectors
         rebound_sector = ""
-        if defensive_mode:
+        if hot_enforced:
+            candidates, stock_intent_stats = analyze_stock_candidates(
+                candidates,
+                bars,
+                latest_str,
+                evidence=evidence,
+                hot_appearances=self.storage.hot_rank_appearances(
+                    [str(item.get("ts_code") or "") for item in candidates],
+                    latest_str,
+                    lookback_days=config.env_int("HOT_PERSISTENCE_LOOKBACK_DAYS", 10),
+                ),
+            )
+            evidence["stock_intent_analysis"] = stock_intent_stats
+            candidates = select_fresh_recommendations(
+                candidates,
+                bars,
+                latest_str,
+                active_codes=self.storage.tracked_or_pending_codes(),
+                limit=config.env_int("FRESH_RECOMMENDATION_COUNT", 5),
+            )
+        elif defensive_mode:
             repair_mode = bool(
                 intent_sequence
                 and any(item["stage"] in {"观望", "砸盘"} for item in intent_sequence[-2:])
@@ -584,6 +715,26 @@ class NightlyPipeline:
                 risk_control_max=config.env_int("RISK_CONTROL_MAX", 3),
                 min_primary_score=config.env_float("PRIMARY_RULE_MIN_SCORE", 75.0),
             )
+        continuations = build_continuation_predictions(
+            self.storage,
+            bars,
+            latest_str,
+            next_day_str,
+            premium_features=premium_features,
+        )
+        continuations, continuation_intent_stats = analyze_continuation_intents(
+            continuations,
+            bars,
+            latest_str,
+            evidence=evidence,
+            premium_features=premium_features,
+            hot_appearances=self.storage.hot_rank_appearances(
+                [str(item.get("ts_code") or "") for item in continuations],
+                latest_str,
+                lookback_days=config.env_int("HOT_PERSISTENCE_LOOKBACK_DAYS", 10),
+            ),
+        )
+        evidence["continuation_intent_analysis"] = continuation_intent_stats
         last_stage = intent_sequence[-1]["stage"] if intent_sequence else "观望"
         forecast_stage = intent_forecast.get("label", "观望")
         stage_playbook = {
@@ -592,13 +743,26 @@ class NightlyPipeline:
             "forecast_stage": forecast_stage,
             "forecast": STAGE_PLAYBOOK.get(forecast_stage, {}),
         }
-        model_version_effective = f"{model_version_effective}+intent_v3"
+        model_version_effective = f"{model_version_effective}+intent_v3+stock_intent_v1"
         latest_dt = datetime.strptime(latest_str, "%Y%m%d")
         next_dt = datetime.strptime(next_day_str, "%Y%m%d")
         data_ok = (
             int(update_result.get("daily", 0)) >= config.env_int("MIN_DAILY_ROWS", 3000)
             and int(update_result.get("basic", 0)) >= config.env_int("MIN_BASIC_ROWS", 2500)
             and int(update_result.get("index", 0)) > 0
+            and (
+                not hot_enforced
+                or int((update_result.get("hot_rank") or {}).get("count", 0)) == 100
+            )
+            and (
+                not hot_enforced
+                or int((update_result.get("six_thousand") or {}).get("hot_candidate_features", 0)) == 100
+            )
+            and (
+                not hot_enforced
+                or int((update_result.get("six_thousand") or {}).get("hot_candidates_covered", 0))
+                >= config.env_int("MIN_HOT_CANDIDATES_COVERED", 50)
+            )
             and context.get("available")
             and bars["trade_date"].nunique() >= 60
         )
@@ -619,8 +783,19 @@ class NightlyPipeline:
             system_status = "facts_only"
         else:
             system_status = "normal"
-        if system_status != "normal":
+        if system_status == "abstain":
             candidates = []
+            continuations = []
+            for scenario in scenarios:
+                scenario["abstain"] = True
+        elif system_status == "facts_only":
+            candidates = []
+            for continuation in continuations:
+                continuation["degraded"] = True
+                continuation["reason"] = (
+                    str(continuation.get("reason") or "")
+                    + "；新闻/资讯证据不足，本次为行情与6000积分数据降级判断"
+                ).strip("；")
             for scenario in scenarios:
                 scenario["abstain"] = True
         evidence["operator_hypotheses"] = infer_operator_playbook(context, evidence, sectors)
@@ -634,6 +809,17 @@ class NightlyPipeline:
             "scenarios": scenarios,
             "sectors": sectors,
             "candidates": candidates,
+            "continuations": continuations,
+            "tracking_evaluation": update_result.get("tracking_evaluation") or {},
+            "hot_rank": {
+                "rank_time": hot_snapshot["rank_time"],
+                "source": hot_snapshot["source"],
+                "count": len(hot_snapshot["items"]),
+            },
+            "six_thousand_features": {
+                "api_count": int((update_result.get("six_thousand") or {}).get("apis", 0)),
+                "row_counts": (update_result.get("six_thousand") or {}).get("row_counts", {}),
+            },
             "evidence": evidence,
             "news": {
                 "total": len(news["items"]),
@@ -662,6 +848,9 @@ class NightlyPipeline:
                     "stage": item.get("stage", item["label"]),
                     "strength": item["strength"],
                     "top_sector": item.get("top_sector", ""),
+                    "retail_sentiment_proxy": item.get("retail_sentiment_proxy", 0.0),
+                    "crowding_risk_proxy": item.get("crowding_risk_proxy", 0.0),
+                    "quant_harvest_risk_proxy": item.get("quant_harvest_risk_proxy", 0.0),
                     "trap_signals": item.get("trap_signals", []),
                     "reasons": item.get("reasons", []),
                 }
@@ -783,7 +972,7 @@ class NightlyPipeline:
             is_formal=is_formal,
         )
         for candidate in payload.get("candidates", []):
-            self.storage.save_prediction(
+            prediction_id = self.storage.save_prediction(
                 run_id=run_id,
                 trade_date=trade_date,
                 decision_time=str(payload.get("decision_time", "")),
@@ -795,11 +984,39 @@ class NightlyPipeline:
                 payload=candidate,
                 is_formal=is_formal,
             )
+            if is_formal and candidate.get("selection_type") == "fresh_hot100":
+                self.storage.create_pending_tracking_position(
+                    origin_prediction_id=prediction_id,
+                    ts_code=str(candidate.get("ts_code") or ""),
+                    opened_for_trade_date=trade_date,
+                    reference_price=float(candidate.get("reference_close") or 0.0),
+                    stop_price=float(candidate.get("stop_loss_price") or 0.0),
+                )
+        for continuation in payload.get("continuations", []):
+            self.storage.save_prediction(
+                run_id=run_id,
+                trade_date=trade_date,
+                decision_time=str(payload.get("decision_time", "")),
+                information_cutoff=str(payload.get("information_cutoff", "")),
+                dataset_version=str(payload.get("dataset_version", "")),
+                model_version=str(payload.get("model_version", "")),
+                category="continuation",
+                entity=continuation.get("ts_code", ""),
+                payload=continuation,
+                is_formal=is_formal,
+            )
+            if is_formal:
+                self.storage.update_tracking_prediction(
+                    int(continuation["tracking_id"]),
+                    trade_date,
+                    float(continuation.get("stop_loss_price") or 0.0),
+                )
 
     def _wecom_summary(self, payload: dict) -> str:
         state = payload.get("market_state") or {}
         scenarios = payload.get("scenarios") or []
         candidates = payload.get("candidates") or []
+        continuations = payload.get("continuations") or []
         sectors = payload.get("sectors") or []
         evidence = payload.get("evidence") or {}
         report_path = payload.get("report_path", "")
@@ -846,7 +1063,7 @@ class NightlyPipeline:
                 f"，仓位{defensive_cands[0].get('position', '')}）"
             )
         if candidates:
-            primary = [c for c in candidates if c.get("tier") == "primary"][:3]
+            primary = [c for c in candidates if c.get("tier") == "primary"][:5]
             pick_text = "、".join(
                 f"{c.get('name')}({c.get('ts_code','').split('.')[0]})" for c in primary
             ) or "无主推荐"
@@ -858,6 +1075,10 @@ class NightlyPipeline:
             "formal": "正式",
             "push_failed": "推送失败",
         }.get(str(payload.get("run_mode") or ""), "未知")
+        continuation_text = "、".join(
+            f"{item.get('ts_code','').split('.')[0]}:{'涨' if item.get('direction') == 'rise' else '不涨'}"
+            for item in continuations
+        ) or "无"
         return (
             f"## 主力策略情景推演 · 目标日{payload.get('next_trade_date')}\n"
             f"> 数据截止：{payload.get('trade_date')} · 运行：{mode_label}\n"
@@ -868,7 +1089,8 @@ class NightlyPipeline:
             f"{lhb_text}\n"
             f"{forecast_text}\n"
             f"{defensive_text}\n"
-            f"> 主推荐：{pick_text}\n"
+            f"> 热榜新推荐：{pick_text}\n"
+            f"> 续跟踪：{continuation_text}\n"
             f"> 系统状态：{payload.get('system_status')}\n"
             f"> 决策时点 {payload.get('decision_time')} · 信息截止 {payload.get('information_cutoff')}\n"
             f"> [完整日报]({link})（公网/内网均可打开）\n"

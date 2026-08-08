@@ -259,7 +259,8 @@ def build_evidence_bundle(
             {
                 "source": source,
                 "title": str(item.get("title") or "")[:160],
-                "publish_time": item.get("published_at"),
+                "summary": str(item.get("summary") or "")[:500],
+                "publish_time": item.get("publish_time") or item.get("published_at"),
                 "impact": round(combined, 4),
                 "weight": round(weight, 4),
                 "sectors": sorted(matched_sectors)[:6],
@@ -313,6 +314,10 @@ def build_evidence_bundle(
         if score > 0
     ][:5]
     evidence_rows.sort(key=lambda row: row["weight"] * abs(row["impact"]), reverse=True)
+    stock_evidence: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in evidence_rows:
+        for code in row.get("stocks") or []:
+            stock_evidence[str(code)].append(row)
     return {
         "available": bool(valid),
         "window_start": window_start,
@@ -328,8 +333,12 @@ def build_evidence_bundle(
         "sector_scores": sector_scores,
         "sector_tags_unmapped": unmapped_sector_tags,
         "stock_scores": stock_scores,
+        "stock_evidence": {
+            code: rows[:8] for code, rows in stock_evidence.items()
+        },
         "operator_hypotheses": actions,
         "top_evidence": evidence_rows[:12],
+        "evidence_items": evidence_rows[:100],
         "filter_stats": filter_stats,
         "impact_status": (impact_result or {}).get("status", "unavailable"),
         "impact_coverage": round(llm_coverage, 4),

@@ -14,6 +14,7 @@ from typing import Any
 
 import requests
 
+from .. import config
 from .tushare_provider import TushareProvider
 
 
@@ -146,10 +147,24 @@ def fetch_minute_bars(
     *,
     provider: TushareProvider | None = None,
 ) -> list[dict[str, Any]]:
-    """主链：Tushare stk_mins；失败依次尝试新浪、东财。返回空列表表示全部失败。"""
+    """主链：Tushare 实时/历史分钟；失败依次尝试新浪、东财。"""
+    tushare = provider
+    if config.env_int("ENABLE_TUSHARE_REALTIME_MINUTE", 0):
+        try:
+            tushare = tushare or TushareProvider()
+            rows = _normalize(
+                tushare.rt_min_daily(ts_code),
+                ts_code,
+                trade_date,
+                "tushare_realtime",
+            )
+            if rows:
+                return rows
+        except Exception:  # noqa: BLE001
+            pass
     try:
         rows = _normalize(
-            (provider or TushareProvider()).stk_mins(ts_code, trade_date),
+            (tushare or TushareProvider()).stk_mins(ts_code, trade_date),
             ts_code,
             trade_date,
             "tushare",

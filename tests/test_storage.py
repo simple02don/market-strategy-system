@@ -95,6 +95,84 @@ def test_prediction_json_is_finite_and_only_formal_predictions_track(tmp_path):
     storage.close()
 
 
+def test_pending_tracking_activates_only_after_filled_replay(tmp_path):
+    storage = Storage(tmp_path / "pending-entry.db")
+    run_id = storage.start_run("nightly", "20260806")
+    prediction_id = storage.save_prediction(
+        run_id=run_id,
+        trade_date="20260806",
+        decision_time="2026-08-05 23:00:00",
+        information_cutoff="2026-08-05 23:00:00",
+        dataset_version="fixture",
+        model_version="rule_v1",
+        category="candidate",
+        entity="600001.SH",
+        payload={"forecast_direction": "rise"},
+        is_formal=True,
+    )
+    tracking_id = storage.create_pending_tracking_position(
+        origin_prediction_id=prediction_id,
+        ts_code="600001.SH",
+        opened_for_trade_date="20260806",
+        reference_price=10.0,
+        stop_price=9.4,
+    )
+    assert storage.active_tracking_codes() == set()
+    assert storage.tracked_or_pending_codes() == {"600001.SH"}
+    storage.save_execution_replay(
+        {
+            "prediction_id": prediction_id,
+            "trade_date": "20260806",
+            "ts_code": "600001.SH",
+            "verdict": "filled",
+            "entry_price": 10.5,
+            "exit_price": 10.8,
+            "reason": "确认条件满足",
+            "source": "fixture",
+        }
+    )
+    result = storage.resolve_pending_tracking_entries("20260806")
+    assert result == {"activated": 1, "not_triggered": 0}
+    assert storage.active_tracking_codes() == {"600001.SH"}
+    row = storage._conn.execute(
+        "SELECT status, entry_price, stop_price FROM tracking_position WHERE id=?",
+        (tracking_id,),
+    ).fetchone()
+    assert row["status"] == "active"
+    assert row["entry_price"] == 10.5
+    assert row["stop_price"] == 9.87
+    storage.close()
+
+
+def test_pending_tracking_closes_when_entry_not_triggered(tmp_path):
+    storage = Storage(tmp_path / "pending-cancel.db")
+    tracking_id = storage.create_pending_tracking_position(
+        origin_prediction_id=7,
+        ts_code="600002.SH",
+        opened_for_trade_date="20260806",
+        reference_price=10.0,
+        stop_price=9.4,
+    )
+    storage.save_execution_replay(
+        {
+            "prediction_id": 7,
+            "trade_date": "20260806",
+            "ts_code": "600002.SH",
+            "verdict": "not_filled",
+            "reason": "未站稳VWAP",
+            "source": "fixture",
+        }
+    )
+    result = storage.resolve_pending_tracking_entries("20260806")
+    assert result == {"activated": 0, "not_triggered": 1}
+    row = storage._conn.execute(
+        "SELECT status, close_reason FROM tracking_position WHERE id=?", (tracking_id,)
+    ).fetchone()
+    assert row["status"] == "closed"
+    assert row["close_reason"] == "entry_not_triggered"
+    storage.close()
+
+
 def test_lhb_upsert_and_read(tmp_path):
     storage = Storage(tmp_path / "test.db")
     daily = [

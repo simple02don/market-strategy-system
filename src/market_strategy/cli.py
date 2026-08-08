@@ -10,6 +10,8 @@ from datetime import date, datetime, timedelta
 from . import config
 from .backtest import run_backtest
 from .calendar import TradingCalendar
+from .hot_rank import import_frozen_hot_rank_fixture
+from .intraday import monitor_pending_entries
 from .models.train import train_all
 from .outcomes import track_outcomes
 from .pipeline import NightlyPipeline
@@ -218,6 +220,28 @@ def cmd_track_outcomes(args) -> int:
     return 0
 
 
+def cmd_monitor_entry(args) -> int:
+    with Storage() as storage:
+        today = now_cst().date()
+        target = args.trade_date or today.strftime("%Y%m%d")
+        if not args.trade_date:
+            provider = TushareProvider()
+            calendar = TradingCalendar(storage, provider)
+            if not calendar.is_trading_day(today):
+                print(json.dumps({"status": "skip", "reason": "not_trading_day"}, ensure_ascii=False))
+                return 0
+        else:
+            provider = None
+        result = monitor_pending_entries(
+            storage,
+            trade_date=args.trade_date,
+            provider=provider,
+            push=not args.no_push,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    return 0
+
+
 def cmd_backtest(args) -> int:
     with Storage() as storage:
         max_date = args.trade_date or storage._conn.execute(
@@ -236,6 +260,13 @@ def cmd_backtest(args) -> int:
             encoding="utf-8",
         )
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    return 0
+
+
+def cmd_hot_fixture_import(args) -> int:
+    with Storage() as storage:
+        result = import_frozen_hot_rank_fixture(storage, args.path)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -260,11 +291,16 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("health", help="健康检查")
     p = sub.add_parser("track-outcomes", help="候选次日结果跟踪")
     p.add_argument("--trade-date")
+    p = sub.add_parser("monitor-entry", help="盘中待入场确认与即时推送")
+    p.add_argument("--trade-date", help="指定交易日（仅测试/补跑）")
+    p.add_argument("--no-push", action="store_true")
     p = sub.add_parser("backtest", help="回测与基线对比")
     p.add_argument("--trade-date")
     p.add_argument("--train-days", type=int, default=400)
     p.add_argument("--test-days", type=int, default=100)
     p.add_argument("--cost-bps", type=float, default=20.0, help="单边交易成本（bp）")
+    p = sub.add_parser("hot-fixture-import", help="导入历史冻结同花顺热榜快照")
+    p.add_argument("--path", required=True)
     args = parser.parse_args(argv)
     config.ensure_dirs()
     return {
@@ -276,7 +312,9 @@ def main(argv: list[str] | None = None) -> int:
         "train-log": cmd_train_log,
         "health": cmd_health,
         "track-outcomes": cmd_track_outcomes,
+        "monitor-entry": cmd_monitor_entry,
         "backtest": cmd_backtest,
+        "hot-fixture-import": cmd_hot_fixture_import,
     }[args.job](args)
 
 

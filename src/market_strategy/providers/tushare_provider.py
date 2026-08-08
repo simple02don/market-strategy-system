@@ -159,6 +159,35 @@ class TushareProvider:
             ),
         )
 
+    # ---- 同花顺热榜 ----
+    def hot_stock_snapshot(self, trade_date: str) -> dict:
+        rows = self.call(
+            "ths_hot",
+            {"trade_date": trade_date, "market": "热股", "is_new": "N"},
+            (
+                "trade_date,data_type,ts_code,ts_name,rank,pct_change,"
+                "current_price,concept,rank_reason,hot,rank_time"
+            ),
+        )
+        rank_times = [str(row.get("rank_time") or "") for row in rows]
+        latest_batch = max((value[:16] for value in rank_times), default="")
+        items = [
+            dict(row)
+            for row in rows
+            if str(row.get("rank_time") or "")[:16] == latest_batch
+        ]
+        items.sort(key=lambda row: int(row.get("rank") or 10_000))
+        latest_rank_time = max(
+            (str(row.get("rank_time") or "") for row in items),
+            default="",
+        )
+        return {
+            "trade_date": trade_date,
+            "rank_time": latest_rank_time,
+            "source": "tushare_ths_hot",
+            "items": items[:100],
+        }
+
     # ---- 分钟线 ----
     def stk_mins(
         self,
@@ -190,6 +219,27 @@ class TushareProvider:
             }
             for row in rows
             if row.get("trade_time", "").startswith(trade_date[:4] + "-" + trade_date[4:6] + "-" + trade_date[6:])
+        ]
+
+    def rt_min_daily(self, ts_code: str) -> list[dict]:
+        """实时分钟行情；需要 Tushare 单独的实时行情权限。"""
+        rows = self.call(
+            "rt_min_daily",
+            {"ts_code": ts_code, "freq": "1MIN"},
+            "ts_code,trade_time,open,high,low,close,vol,amount",
+        )
+        return [
+            {
+                "ts_code": str(row.get("ts_code") or ts_code),
+                "trade_time": str(row.get("trade_time") or ""),
+                "open": float(row.get("open") or 0.0),
+                "high": float(row.get("high") or 0.0),
+                "low": float(row.get("low") or 0.0),
+                "close": float(row.get("close") or 0.0),
+                "vol": float(row.get("vol") or 0.0),
+                "amount": float(row.get("amount") or 0.0),
+            }
+            for row in rows
         ]
 
     # ---- 新闻（财联社，含正文摘要）----

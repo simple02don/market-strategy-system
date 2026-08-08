@@ -580,6 +580,22 @@ def test_no_stage_signal_fails_closed_to_wait():
     assert forecast_next_intent([result])["label"] == "观望"
 
 
+def test_behavior_risk_proxies_raise_distribution_risk():
+    snap = _base_snap()
+    snap.update(
+        {
+            "crowding_risk_proxy": 0.8,
+            "quant_harvest_risk_proxy": 0.75,
+            "retail_sentiment_proxy": 0.7,
+        }
+    )
+
+    result = infer_daily_intent(snap)
+
+    assert result["probabilities"]["派发"] > 0
+    assert any("量化收割风险代理" in item for item in result["trap_signals"])
+
+
 def _snap(stage, top="半导体", surge=1.0, close_loc=0.6, limit_up=0, upper=0.0, lower=0.0, pct=2.0):
     return {
         "stage": stage,

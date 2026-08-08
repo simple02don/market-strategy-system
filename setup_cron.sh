@@ -23,6 +23,8 @@ SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 0 23 * * * bash -lc 'cd $DIR && ./run.sh nightly $NIGHTLY_ARGS >> logs/cron_nightly.log 2>&1' $MARKER
 15 23 * * * bash -lc 'cd $DIR && ./run.sh track-outcomes >> logs/cron_track_outcomes.log 2>&1' $MARKER
+# 交易时段每分钟检查待入场候选；命令内部负责交易日、09:45 和收盘门槛。
+* 9-11,13-15 * * 1-5 bash -lc 'cd $DIR && ./run.sh monitor-entry >> logs/cron_monitor_entry.log 2>&1' $MARKER
 8 23 * * * bash -lc 'cd $DIR && ./run.sh health >> logs/cron_health.log 2>&1' $MARKER
 0 2 * * 6 bash -lc 'cd $DIR && ./run.sh train >> logs/cron_train.log 2>&1' $MARKER
 0 3 * * 6 bash -lc 'cd $DIR && ./run.sh backtest >> logs/cron_backtest.log 2>&1' $MARKER

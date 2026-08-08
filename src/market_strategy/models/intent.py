@@ -213,13 +213,46 @@ def _day_snapshot(
         (f"{trade_date}%",),
     ).fetchone()
     policy_count = int(policy_rows["n"] or 0)
+    limit_up = int(breadth.get("limit_up", 0) or 0)
+    limit_total = limit_up + limit_down
+    limit_balance = (limit_up - limit_down) / max(10, limit_total)
+    focal_up_ratio = float(focal.get("up_ratio", 0.0) or 0.0)
+    retail_sentiment_proxy = float(
+        np.clip(
+            (adv - 0.5) * 1.4
+            + limit_balance * 0.35
+            + (focal_up_ratio - 0.5) * 0.35,
+            -1.0,
+            1.0,
+        )
+    )
+    crowding_risk_proxy = float(
+        np.clip(
+            max(0.0, float(focal.get("today_pct", 0.0) or 0.0)) / 8.0 * 0.25
+            + min(1.0, int(focal.get("limit_up", 0) or 0) / 15.0) * 0.30
+            + min(1.0, float(focal.get("surge", 0.0) or 0.0) / 1.5) * 0.20
+            + min(1.0, structure["pct_std"] / 6.0) * 0.25,
+            0.0,
+            1.0,
+        )
+    )
+    quant_harvest_risk_proxy = float(
+        np.clip(
+            crowding_risk_proxy * 0.45
+            + structure["upper_shadow"] * 0.30
+            + max(0.0, 0.45 - adv) * 0.45
+            + max(0.0, ret1) * max(0.0, 0.5 - adv) * 2.0,
+            0.0,
+            1.0,
+        )
+    )
 
     return {
         "trade_date": trade_date,
         "advance": adv,
         "ret1": ret1,
         "ret5": ret5,
-        "limit_up": int(breadth.get("limit_up", 0) or 0),
+        "limit_up": limit_up,
         "limit_down": limit_down,
         "top_sector": focal_industry,
         "top_sector_20d": str(top_20d.get("industry", "")),
@@ -238,6 +271,9 @@ def _day_snapshot(
         "lhb_net_yi": round(lhb_net / 1e8, 2),
         "inst_net_yi": round(inst_net / 1e8, 2),
         "policy_count": policy_count,
+        "retail_sentiment_proxy": round(retail_sentiment_proxy, 4),
+        "crowding_risk_proxy": round(crowding_risk_proxy, 4),
+        "quant_harvest_risk_proxy": round(quant_harvest_risk_proxy, 4),
     }
 
 
@@ -254,6 +290,9 @@ def _stage_signals(snap: dict[str, Any]) -> tuple[dict[str, float], list[str]]:
     pct_std = snap["pct_std"]
     pct_median = snap["pct_median"]
     adv = snap["advance"]
+    retail_sentiment = float(snap.get("retail_sentiment_proxy", 0.0) or 0.0)
+    crowding_risk = float(snap.get("crowding_risk_proxy", 0.0) or 0.0)
+    quant_harvest_risk = float(snap.get("quant_harvest_risk_proxy", 0.0) or 0.0)
 
     # 砸盘：放量长阴 + 收在低位 / 破位
     if focal_pct <= -2.5 and (surge >= 1.2 or close_loc < 0.35):
@@ -274,6 +313,15 @@ def _stage_signals(snap: dict[str, Any]) -> tuple[dict[str, float], list[str]]:
         signals.append(
             f"拉高{focal_pct:+.1f}%但涨停{limit_up}家/放量{surge:.2f}x/上影{upper:.0%}，"
             "追高盘聚集，存在派发嫌疑"
+        )
+    if crowding_risk >= 0.65:
+        scores["派发"] += 0.25
+        signals.append(f"追涨拥挤风险代理{crowding_risk:.2f}，高位接力资金集中")
+    if quant_harvest_risk >= 0.65:
+        scores["派发"] += 0.20
+        scores["砸盘"] += 0.10
+        signals.append(
+            f"量化收割风险代理{quant_harvest_risk:.2f}，指数/宽度/上影出现不利组合"
         )
     # 拉升高潮：强涨 + 涨停潮/放量，但收盘强势、无明确出货结构
     climax = bool(
@@ -308,6 +356,8 @@ def _stage_signals(snap: dict[str, Any]) -> tuple[dict[str, float], list[str]]:
     if focal_pct == 0 or (abs(focal_pct) < 1.0 and surge < 1.1 and adv < 0.5):
         scores["观望"] += 0.5
         signals.append("无焦点板块或缩量无方向")
+    if retail_sentiment <= -0.55:
+        signals.append(f"散户情绪代理{retail_sentiment:.2f}，市场处于明显恐慌区")
     return scores, signals
 
 
