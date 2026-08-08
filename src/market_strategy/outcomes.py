@@ -12,7 +12,9 @@ from .storage import Storage
 
 
 def track_outcomes(storage: Storage, max_data_date: str) -> dict:
-    replay = run_replay(storage, storage.pending_replays(max_data_date))
+    replay = run_replay(
+        storage, storage.pending_replays(max_data_date), max_data_date=max_data_date
+    )
     entry_resolution = storage.resolve_pending_tracking_entries(max_data_date)
     pending = storage.pending_outcomes(max_data_date)
     if not pending:
@@ -75,10 +77,12 @@ def track_outcomes(storage: Storage, max_data_date: str) -> dict:
                 entry = float(execution["entry_price"] or 0.0)
                 exit_price = float(execution["exit_price"] or 0.0)
                 if entry <= 0 or exit_price <= 0:
+                    # exit 未结算（目标日+1 尚未到账）或入场价异常，等下次跟踪补齐。
                     continue
                 gross_ret = (exit_price / entry - 1.0) * 100.0
                 ret_next = gross_ret - roundtrip_cost_pp
-                measurement = "trigger_entry_to_close_after_cost"
+                # T+1 可执行口径：确认价买入 → 目标日次日（T+1）收盘卖出。
+                measurement = "trigger_entry_to_next_close_after_cost"
             else:
                 # 确认条件未触发即保持现金，不虚构一笔开盘成交。
                 ret_next = 0.0

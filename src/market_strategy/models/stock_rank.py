@@ -102,8 +102,13 @@ def hard_eligible_stocks(
             else -1
         )
     )
-    limit_up = np.where(merged["symbol"].str.startswith("30"), 19.8, 9.8)
-    merged["limit_up_break"] = merged["pct_chg"] >= limit_up - 0.2
+    from ..limit_rules import limit_up_pct
+
+    merged["limit_up_break"] = merged.apply(
+        lambda row: float(row["pct_chg"] or 0.0)
+        >= limit_up_pct(row["ts_code"], name=row.get("name", ""), trade_date=trade_date),
+        axis=1,
+    )
     merged["valuation_risk"] = np.select(
         [
             ~np.isfinite(merged["pe_ttm"]) | (merged["pe_ttm"] <= 0),

@@ -418,11 +418,12 @@ def test_outcome_uses_confirmed_entry_instead_of_open_proxy(tmp_path):
         (prediction_id,),
     ).fetchone()
     assert round(row["ret_next"], 4) == round((11.0 / 10.5 - 1.0) * 100.0 - 0.4, 4)
-    assert row["measurement"] == "trigger_entry_to_close_after_cost"
+    assert row["measurement"] == "trigger_entry_to_next_close_after_cost"
     storage.close()
 
 
-def test_track_outcomes_settles_intraday_filled_replay_at_daily_close(tmp_path):
+def test_track_outcomes_settles_filled_replay_at_next_trading_day_close(tmp_path):
+    """T+1 口径：入场日次日（T+1）收盘价结算；次日未到账时 exit 挂起。"""
     storage = Storage(tmp_path / "settlement.db")
     storage.upsert_stock_basic(
         [{"ts_code": "600489.SH", "name": "测试黄金", "industry": "黄金"}]
@@ -448,6 +449,16 @@ def test_track_outcomes_settles_intraday_filled_replay_at_daily_close(tmp_path):
                 "close": 11.0,
                 "pre_close": 10.0,
                 "pct_chg": 10.0,
+            },
+            {
+                "ts_code": "600489.SH",
+                "trade_date": "20260807",
+                "open": 11.4,
+                "high": 11.6,
+                "low": 11.1,
+                "close": 11.5,
+                "pre_close": 11.0,
+                "pct_chg": 4.55,
             },
         ],
         "fixture",
@@ -479,13 +490,23 @@ def test_track_outcomes_settles_intraday_filled_replay_at_daily_close(tmp_path):
     )
     storage.upsert_minute_bars(_minutes(10.1, [10.2] * 15 + [11.0]))
 
+    # 入场日当晚：T+1 卖出日（8/7）尚未到账，结算挂起，不产生收益记录。
     result = track_outcomes(storage, "20260806")
+    assert result["tracked"] == 0
+    replay = storage._conn.execute(
+        "SELECT entry_price, exit_price FROM execution_replay WHERE prediction_id=?",
+        (prediction_id,),
+    ).fetchone()
+    assert replay["entry_price"] == 10.5
+    assert replay["exit_price"] is None
 
+    # 卖出日收盘后：用 T+1（8/7）收盘价结算。
+    result = track_outcomes(storage, "20260807")
     assert result["tracked"] == 1
     replay = storage._conn.execute(
         "SELECT entry_price, exit_price FROM execution_replay WHERE prediction_id=?",
         (prediction_id,),
     ).fetchone()
     assert replay["entry_price"] == 10.5
-    assert replay["exit_price"] == 11.0
+    assert replay["exit_price"] == 11.5
     storage.close()

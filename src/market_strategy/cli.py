@@ -148,7 +148,19 @@ def cmd_train_log(args) -> int:
 def cmd_health(args) -> int:
     with Storage() as storage:
         current = now_cst()
-        latest = storage.latest_run("nightly")
+        # 只认“正式”夜间运行（is_formal=1 的 nightly_report），
+        # 排除 dry_run/未推送的干跑，避免干跑被误判为健康。
+        row = storage._conn.execute(
+            """
+            SELECT r.* FROM run_log r
+            JOIN prediction_log p ON p.run_id = r.run_id
+            WHERE r.job = 'nightly'
+              AND p.category = 'nightly_report'
+              AND p.is_formal = 1
+            ORDER BY r.run_id DESC LIMIT 1
+            """
+        ).fetchone()
+        latest = dict(row) if row else None
         payload = {}
         if latest:
             row = storage._conn.execute(

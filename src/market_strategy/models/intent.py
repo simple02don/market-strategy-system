@@ -81,6 +81,7 @@ def _focal_sectors(
     trade_date: str,
     industry_map: dict[str, str],
     top: int = 3,
+    stock_names: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     today = bars[bars["trade_date"] == trade_date].copy()
     if today.empty:
@@ -94,19 +95,24 @@ def _focal_sectors(
         else pd.Series(dtype=float)
     )
     rows: list[dict[str, Any]] = []
+    stock_names = stock_names or {}
     for industry, group in today.groupby("industry"):
         if len(group) < MIN_FOCAL_STOCKS:
             continue
         pct = group["pct_chg"].astype(float)
         today_pct = float(pct.mean())
         up_ratio = float((pct > 0).mean())
-        symbol = group["ts_code"].astype(str).str.split(".").str[0]
-        limits = np.where(
-            symbol.str.startswith(("688", "689", "30")),
-            19.8,
-            np.where(symbol.str.startswith(("8", "4", "920")), 29.8, 9.8),
+        # 涨跌停判定统一走 limit_rules（按板块 + 风险警示历史规则 + 统一容差）
+        from ..limit_rules import limit_up_pct
+
+        limits = group["ts_code"].map(
+            lambda code: limit_up_pct(
+                code,
+                name=stock_names.get(code, ""),
+                trade_date=trade_date,
+            )
         )
-        limit_up = int((pct.to_numpy() >= limits - 0.2).sum())
+        limit_up = int((pct.to_numpy() >= limits.to_numpy()).sum())
         amount_today = float(group["amount"].astype(float).sum())
         surge = 0.0
         if industry in hist_amount.index.get_level_values(0):
@@ -179,7 +185,11 @@ def _day_snapshot(
 
     sectors_20d = rank_sectors(day_bars, trade_date, industry_map, top=5)
     top_20d = sectors_20d[0] if sectors_20d else {}
-    focal_list = _focal_sectors(bars, trade_date, industry_map, top=2)
+    stock_names = {
+        str(row[0]): str(row[1] or "")
+        for row in storage._conn.execute("SELECT ts_code, name FROM stock_basic").fetchall()
+    }
+    focal_list = _focal_sectors(bars, trade_date, industry_map, top=2, stock_names=stock_names)
     focal = focal_list[0] if focal_list else {}
     second_focal = focal_list[1] if len(focal_list) > 1 else {}
     focal_industry = str(focal.get("industry", ""))
@@ -206,11 +216,15 @@ def _day_snapshot(
     policy_rows = storage._conn.execute(
         """
         SELECT COUNT(*) AS n FROM news_item
-        WHERE publish_time LIKE ? AND (title LIKE '%政策%' OR title LIKE '%国务院%'
+        WHERE (substr(publish_time, 1, 10) = ? OR publish_time LIKE ?)
+          AND (title LIKE '%政策%' OR title LIKE '%国务院%'
           OR title LIKE '%证监会%' OR title LIKE '%央行%' OR title LIKE '%发改委%'
           OR title LIKE '%规划%')
         """,
-        (f"{trade_date}%",),
+        (
+            f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}",
+            f"{trade_date}%",
+        ),
     ).fetchone()
     policy_count = int(policy_rows["n"] or 0)
     limit_up = int(breadth.get("limit_up", 0) or 0)

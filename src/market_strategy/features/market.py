@@ -24,7 +24,12 @@ def _load_bars(storage: Storage, start: str, end: str) -> pd.DataFrame:
     return df
 
 
-def market_breadth(bars: pd.DataFrame, trade_date: str, window: int = 60) -> dict:
+def market_breadth(
+    bars: pd.DataFrame,
+    trade_date: str,
+    window: int = 60,
+    stock_names: dict[str, str] | None = None,
+) -> dict:
     today = bars[bars["trade_date"] == trade_date].copy()
     if today.empty:
         return {
@@ -37,14 +42,28 @@ def market_breadth(bars: pd.DataFrame, trade_date: str, window: int = 60) -> dic
     up = int((pct > 0).sum())
     down = int((pct < 0).sum())
     flat = int((pct == 0).sum())
-    symbols = today["ts_code"].astype(str).str.split(".").str[0]
-    limits = np.where(
-        symbols.str.startswith(("688", "689", "30")),
-        19.8,
-        np.where(symbols.str.startswith(("8", "4", "920")), 29.8, 9.8),
+    # 涨跌停判定统一走 limit_rules（按板块 + 风险警示历史规则 + 统一容差）。
+    from ..limit_rules import limit_down_pct, limit_up_pct
+
+    codes = today["ts_code"].astype(str)
+    if stock_names is None:
+        stock_names = {}
+    limits = codes.map(
+        lambda code: limit_up_pct(
+            code,
+            name=stock_names.get(code, ""),
+            trade_date=trade_date,
+        )
     )
-    limit_up = int((pct.to_numpy() >= limits).sum())
-    limit_down = int((pct.to_numpy() <= -limits).sum())
+    down_limits = codes.map(
+        lambda code: limit_down_pct(
+            code,
+            name=stock_names.get(code, ""),
+            trade_date=trade_date,
+        )
+    )
+    limit_up = int((pct.to_numpy() >= limits.to_numpy()).sum())
+    limit_down = int((pct.to_numpy() <= down_limits.to_numpy()).sum())
 
     highs = bars.pivot_table(index="ts_code", columns="trade_date", values="high")
     lows = bars.pivot_table(index="ts_code", columns="trade_date", values="low")
@@ -92,7 +111,13 @@ def market_context(
     # dates 为倒序；索引越大日期越早。
     start = dates[min(len(dates) - 1, idx + history_days - 1)]
     bars = _load_bars(storage, start, trade_date)
-    breadth = market_breadth(bars, trade_date)
+    stock_names = {
+        str(row[0]): str(row[1] or "")
+        for row in storage._conn.execute(
+            "SELECT ts_code, name FROM stock_basic"
+        ).fetchall()
+    }
+    breadth = market_breadth(bars, trade_date, stock_names=stock_names)
 
     index_rows = pd.read_sql_query(
         "SELECT * FROM index_daily WHERE trade_date BETWEEN ? AND ?",

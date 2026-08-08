@@ -47,6 +47,7 @@ def test_existing_replay_table_migrates_plan_type_column(tmp_path):
 
 
 def test_unsettled_execution_count_only_counts_filled_without_exit(tmp_path):
+    """T+1 语义：仅“卖出日（入场日+1 交易日）已到”但未结算的 filled 计入。"""
     storage = Storage(tmp_path / "unsettled.db")
     rows = [
         (1, "20260806", "600001.SH", "filled", 10.0, None),
@@ -64,8 +65,10 @@ def test_unsettled_execution_count_only_counts_filled_without_exit(tmp_path):
     )
     storage._conn.commit()
 
-    assert storage.unsettled_execution_count("20260806") == 1
-    assert storage.unsettled_execution_count("20260807") == 2
+    # 最新数据日=20260806 时，20260806 入场的（行1/4 均为入场日==最新日）次日未到，不计入。
+    assert storage.unsettled_execution_count("20260806") == 0
+    # 最新数据日=20260807 时，只有行1（20260806 入场、未结算）应结算。
+    assert storage.unsettled_execution_count("20260807") == 1
     storage.close()
 
 
@@ -333,7 +336,7 @@ def test_outcome_summary_excludes_legacy_open_proxy_measurements(tmp_path):
             "prediction_id": 2,
             "ret_next": 1.0,
             "excess": 0.6,
-            "measurement": "trigger_entry_to_close_after_cost",
+            "measurement": "trigger_entry_to_next_close_after_cost",
         }
     )
     summary = storage.outcome_summary()

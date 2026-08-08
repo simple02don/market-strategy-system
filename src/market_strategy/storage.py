@@ -1713,6 +1713,8 @@ class Storage:
         return [dict(row) for row in rows]
 
     def unsettled_execution_count(self, max_data_date: str) -> int:
+        # T+1 口径：只有“卖出日（目标日+1 交易日）已到”的已触发回放才要求结算。
+        # 入场日 == 最新数据日（今天刚入场，次日才可卖）不计入未结算。
         row = self._conn.execute(
             """
             SELECT COUNT(*) AS count
@@ -1720,7 +1722,7 @@ class Storage:
             WHERE verdict='filled'
               AND entry_price > 0
               AND exit_price IS NULL
-              AND trade_date <= ?
+              AND trade_date < ?
             """,
             (max_data_date,),
         ).fetchone()
@@ -1833,8 +1835,9 @@ class Storage:
     def outcome_summary(self) -> dict:
         # 旧版本把所有候选都按“次日开盘买入”代理统计，且包含观察/回避层。
         # 修复后的统计只允许真实触发回放口径进入主指标，旧样本保留但隔离展示。
+        # 主口径为 T+1 可执行收益：确认价买入 → 目标日次日（T+1）收盘卖出。
         valid_measurements = (
-            "trigger_entry_to_close_after_cost",
+            "trigger_entry_to_next_close_after_cost",
             "trigger_not_executed_cash",
         )
         row = self._conn.execute(

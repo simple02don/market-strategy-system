@@ -22,7 +22,12 @@ from .features.materialize import (
     build_sector_features,
     build_stock_features,
 )
-from .features.evidence import build_evidence_bundle, canonical_title, filter_pit_items
+from .features.evidence import (
+    _parse_time,
+    build_evidence_bundle,
+    canonical_title,
+    filter_pit_items,
+)
 from .features.lhb import build_lhb_summary
 from .features.market import market_context
 from .models import build_scenarios, classify_market_state, rank_sectors, rank_stocks
@@ -58,6 +63,27 @@ from .push.wecom import WeComPusher
 from .report import generate_report
 from .storage import Storage, _json_safe
 from .timeutil import now_cst, now_str
+
+
+def filter_llm_stock_codes(
+    assessments: dict[str, dict[str, Any]],
+    valid_symbols: set[str],
+) -> tuple[dict[str, dict[str, Any]], int]:
+    """LLM 影响评估中的股票代码与上市股票池交叉校验，过滤幻觉代码。
+
+    返回 (过滤后的 assessments, 丢弃的代码条数)。直接修改传入 dict 的子列表，
+    返回的丢弃数为增量统计，供调用方记录。
+    """
+    dropped = 0
+    for assessment in assessments.values():
+        kept = []
+        for stock in assessment.get("stocks") or []:
+            if str(stock.get("code") or "") in valid_symbols:
+                kept.append(stock)
+            else:
+                dropped += 1
+        assessment["stocks"] = kept
+    return assessments, dropped
 
 
 def _git_commit() -> str:
@@ -520,6 +546,15 @@ class NightlyPipeline:
             "model": impact_model,
             "cache_version": impact_cache_version,
         }
+        # LLM 影响评估中的股票代码与上市股票池交叉校验，过滤幻觉代码。
+        valid_symbols = {
+            str(row[0]).split(".", 1)[0]
+            for row in self.storage._conn.execute(
+                "SELECT ts_code FROM stock_basic WHERE list_status='L'"
+            ).fetchall()
+        }
+        _, llm_code_dropped = filter_llm_stock_codes(combined_assessments, valid_symbols)
+        impact["llm_code_dropped"] = llm_code_dropped
         fact_stats = extract_facts(
             self.storage,
             pit_items,
@@ -930,7 +965,12 @@ class NightlyPipeline:
         shared = {"ok": False, "reason": "not_tried"}
         try:
             cached = self.shared.event_items(date(*map(int, (latest_str[:4], latest_str[4:6], latest_str[6:]))))
-            if cached.get("ok"):
+            asof = str(cached.get("asof") or "")
+            cutoff_dt = _parse_time(information_cutoff)
+            asof_dt = _parse_time(asof) if asof else None
+            # 共享缓存若晚于信息截止生成，其事件可能包含截止后才发布的内容，
+            # 无法证明时点，整体丢弃（宁可少料，不可用错料）。
+            if cached.get("ok") and asof_dt is not None and cutoff_dt is not None and asof_dt <= cutoff_dt:
                 shared_items = [
                     {
                         "source": str(item.get("source", "shared")),
@@ -946,7 +986,15 @@ class NightlyPipeline:
                     for index, item in enumerate(cached["items"][:60])
                     if item.get("title")
                 ]
-                shared = {"ok": True, "reason": "", "asof": cached.get("asof", "")}
+                shared = {"ok": True, "reason": "", "asof": asof}
+            else:
+                shared = {
+                    "ok": False,
+                    "reason": (
+                        f"共享缓存 asof({asof or '空'})晚于或无法与信息截止对齐，已整体排除"
+                    ),
+                    "asof": asof,
+                }
         except Exception as exc:  # noqa: BLE001
             shared = {"ok": False, "reason": str(exc)[:200]}
 

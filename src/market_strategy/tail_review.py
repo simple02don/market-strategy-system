@@ -101,8 +101,9 @@ def _payload(value: Any) -> dict[str, Any]:
 
 
 def _upper_limit_price(ts_code: str, pre_close: float) -> float:
-    symbol = ts_code.split(".", 1)[0]
-    rate = 0.20 if symbol.startswith(("30", "68")) else 0.10
+    from .limit_rules import limit_rate
+
+    rate = limit_rate(ts_code)
     return round(pre_close * (1.0 + rate), 2)
 
 

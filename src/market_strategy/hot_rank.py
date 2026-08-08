@@ -60,7 +60,9 @@ def capture_hot_rank(
     captured_dt = _parse_time(captured_at)
     if rank_dt > captured_dt + timedelta(minutes=5):
         raise HotRankUnavailable("同花顺热榜 rank_time 晚于系统捕获时间")
-    max_age_hours = config.env_float("MAX_HOT_RANK_AGE_HOURS", 240.0)
+    # 新鲜度上限默认 72h：覆盖周末（周五收盘快照周六/日/周一凌晨仍可接受），
+    # 但拒绝更旧的缓存快照（如接口故障返回上周数据），防止基于过期热榜推演。
+    max_age_hours = config.env_float("MAX_HOT_RANK_AGE_HOURS", 72.0)
     age_hours = (captured_dt - rank_dt).total_seconds() / 3600.0
     if age_hours > max_age_hours:
         raise HotRankUnavailable(

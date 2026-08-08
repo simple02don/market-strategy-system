@@ -11,6 +11,7 @@ from typing import Any
 import requests
 
 from .. import config
+from ..timeutil import CST
 from .tushare_provider import TushareProvider
 
 UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
@@ -30,6 +31,17 @@ def _dedup_key(source: str, title: str) -> str:
     del source
     normalized = re.sub(r"[\W_]+", "", _clean(title).lower(), flags=re.UNICODE)
     return _hash(normalized)
+
+
+def _epoch_to_beijing(millis: Any) -> str:
+    """巨潮公告 epoch（毫秒，北京时间）→ 'YYYY-MM-DD HH:MM:SS'。
+
+    显式用 Asia/Shanghai 解析，避免服务器本地时区（如 UTC）导致
+    PIT 过滤放行截止后公告。
+    """
+    return datetime.fromtimestamp(float(millis) / 1000, tz=CST).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
 
 
 def _extract_publish_time(fragment: str) -> str:
@@ -224,11 +236,7 @@ class NewsCollector:
                     title = _clean(row.get("announcementTitle"))
                     code = str(row.get("secCode") or "").zfill(6)
                     ts = row.get("announcementTime")
-                    pub = (
-                        datetime.fromtimestamp(float(ts) / 1000).strftime("%Y-%m-%d %H:%M:%S")
-                        if ts
-                        else ""
-                    )
+                    pub = _epoch_to_beijing(ts) if ts else ""
                     adjunct = str(row.get("adjunctUrl") or "")
                     url = "https://static.cninfo.com.cn/" + adjunct if adjunct else ""
                     if not code or not title or (code, title) in seen:

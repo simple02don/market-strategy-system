@@ -32,6 +32,7 @@ def _execution_plan(prediction: dict[str, Any]) -> dict[str, Any]:
         "latest_confirm_time": "10:15",
         "max_open_gap_pct": 0.03,
         "cancel_open_gap_pct": 0.05,
+        "max_confirm_gap_pct": 0.06,
         "cancel_below_prev_low": True,
         "require_close15_above_vwap": True,
         "reject_locked_limit_up": True,
@@ -106,6 +107,7 @@ def replay_candidate(
         }
     cancel_open_gap = float(plan.get("cancel_open_gap_pct", 0.05) or 0.05)
     max_open_gap = float(plan.get("max_open_gap_pct", 0.03) or 0.03)
+    max_confirm_gap = float(plan.get("max_confirm_gap_pct", 0.06) or 0.06)
     common_base = {
         **base,
         "high_open_pct": round(high_open_pct, 4),
@@ -127,9 +129,10 @@ def replay_candidate(
         if min_price is None or float(min_price) <= 0:
             return {**common_base, "verdict": "canceled", "reason": "避风港计划缺少MA20基准"}
 
-    symbol = ts_code.split(".", 1)[0]
-    limit_rate = 0.20 if symbol.startswith(("30", "68")) else 0.10
-    upper_limit_price = round(pre_close * (1.0 + limit_rate), 2)
+    from ..limit_rules import limit_rate
+
+    limit_rate_value = limit_rate(ts_code)
+    upper_limit_price = round(pre_close * (1.0 + limit_rate_value), 2)
     last_common = common_base
     last_reason = "尚未满足确认条件"
     for confirm_minutes in range(min_confirm_minutes, len(eligible_rows) + 1):
@@ -190,6 +193,12 @@ def replay_candidate(
         if plan.get("reject_locked_limit_up", True) and close_price >= upper_limit_price - 0.005:
             last_reason = "确认价位于涨停价，无法按普通成交假设入场"
             continue
+        confirm_gap = close_price / pre_close - 1.0 if pre_close > 0 else 0.0
+        if confirm_gap > max_confirm_gap + 1e-9:
+            last_reason = (
+                f"确认时点涨幅{confirm_gap:.1%}超过{max_confirm_gap:.1%}上限，不追价"
+            )
+            continue
         return {
             **common,
             "verdict": "filled",
@@ -208,6 +217,7 @@ def run_replay(
     records: list[dict[str, Any]],
     *,
     provider=None,
+    max_data_date: str | None = None,
 ) -> dict[str, Any]:
     if not records or not config.env_int("REPLAY_MINUTES", 1):
         return {"replayed": 0, "filled": 0, "not_filled": 0, "canceled": 0, "no_data": 0}
@@ -215,9 +225,15 @@ def run_replay(
     for record in records:
         ts_code = str(record.get("entity") or "")
         trade_date = str(record.get("trade_date") or "")
+        # T+1：收益结算用“目标日之后第一个交易日”的收盘价（当日买入当日不可卖出）。
+        # max_data_date 提供数据上界；目标日+1 尚未到账时不结算（exit 挂起，跨天重试）。
         settlement = storage._conn.execute(
-            "SELECT close FROM daily_bar WHERE ts_code=? AND trade_date=?",
-            (ts_code, trade_date),
+            """
+            SELECT close FROM daily_bar
+            WHERE ts_code=? AND trade_date > ? AND trade_date <= ?
+            ORDER BY trade_date ASC LIMIT 1
+            """,
+            (ts_code, trade_date, max_data_date or trade_date),
         ).fetchone()
         settlement_price = float(settlement["close"] or 0.0) if settlement else None
         existing = storage._conn.execute(
@@ -231,12 +247,16 @@ def run_replay(
             existing
             and str(existing["verdict"]) == "filled"
             and float(existing["entry_price"] or 0.0) > 0
-            and existing["exit_price"] is None
-            and settlement_price is not None
-            and settlement_price > 0
         ):
-            storage.settle_execution_replay(int(record["id"]), settlement_price)
-            counts["filled"] += 1
+            # 已确认成交的记录：保留盘中冻结的确认价，不重新回放覆盖；
+            # 仅在 T+1 卖出日（目标日之后第一个交易日）收盘价可得时补齐 exit。
+            if (
+                existing["exit_price"] is None
+                and settlement_price is not None
+                and settlement_price > 0
+            ):
+                storage.settle_execution_replay(int(record["id"]), settlement_price)
+                counts["filled"] += 1
             continue
         rows = storage.minute_bars(ts_code, trade_date)
         if len(rows) < 30:
