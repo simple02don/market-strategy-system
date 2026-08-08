@@ -73,7 +73,15 @@ def test_premium_bundle_includes_active_tracking_codes_outside_hot100():
 
 def test_auction_permissions_capture_open_close_and_current(monkeypatch):
     monkeypatch.setenv("ENABLE_TUSHARE_OPEN_AUCTION", "1")
-    provider = _FakeProvider({})
+    provider = _FakeProvider(
+        {
+            api: [
+                {"ts_code": "000001.SZ"},
+                {"ts_code": "600000.SH"},
+            ]
+            for api in AUCTION_CANDIDATE_APIS
+        }
+    )
 
     bundle = capture_six_thousand_signals(
         provider,
@@ -84,6 +92,14 @@ def test_auction_permissions_capture_open_close_and_current(monkeypatch):
     called = {api for api, _params in provider.calls}
     assert set(AUCTION_CANDIDATE_APIS) <= called
     assert set(AUCTION_CANDIDATE_APIS) <= set(bundle["optional_inventory"])
+    assert all(
+        bundle["datasets"][api] == [{"ts_code": "000001.SZ"}]
+        for api in AUCTION_CANDIDATE_APIS
+    )
+    assert all(
+        sum(api == called_api for called_api, _params in provider.calls) == 1
+        for api in AUCTION_CANDIDATE_APIS
+    )
 
 
 def test_premium_features_reward_flow_and_apply_risk_veto():
@@ -112,7 +128,7 @@ def test_premium_features_reward_flow_and_apply_risk_veto():
             ],
             "stk_auction_c": [
                 {"ts_code": "000001.SZ", "amount": 50000000, "vwap": 10.2},
-                {"ts_code": "000002.SZ", "amount": 500000000, "vwap": 11},
+                {"ts_code": "000002.SZ", "amount": 500000000, "vwap": 10.8},
             ],
             "kpl_list": [
                 {"ts_code": "000001.SZ", "open_num": 0, "limit_order": 300000000},
@@ -149,7 +165,7 @@ def test_premium_features_reward_flow_and_apply_risk_veto():
     assert "涨停反复开板" in features["000002.SZ"]["risk_flags"]
     assert "筹码获利盘过度拥挤" in features["000002.SZ"]["risk_flags"]
     assert features["000001.SZ"]["factor_coverage"] == 0.6
-    assert features["000001.SZ"]["closing_auction_score"] < features["000002.SZ"]["closing_auction_score"]
+    assert features["000001.SZ"]["closing_auction_score"] > features["000002.SZ"]["closing_auction_score"]
     assert "board" in features["000001.SZ"]["missing_factors"]
 
 

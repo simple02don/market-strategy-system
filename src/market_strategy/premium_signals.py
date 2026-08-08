@@ -152,8 +152,6 @@ def capture_six_thousand_signals(
             errors[api_name] = f"{type(exc).__name__}: {exc}"
 
     optional_specs = dict(OPTIONAL_CANDIDATE_APIS)
-    if config.env_int("ENABLE_TUSHARE_OPEN_AUCTION", 0):
-        optional_specs.update(AUCTION_CANDIDATE_APIS)
     for api_name, query_field in optional_specs.items():
         rows: list[dict] = []
         for code in sorted(optional_candidate_codes):
@@ -168,6 +166,22 @@ def capture_six_thousand_signals(
                 optional_errors[f"{api_name}:{code}"] = f"{type(exc).__name__}: {exc}"
         datasets[api_name] = rows
 
+    auction_enabled = bool(config.env_int("ENABLE_TUSHARE_OPEN_AUCTION", 0))
+    if auction_enabled:
+        for api_name in AUCTION_CANDIDATE_APIS:
+            try:
+                params = {"trade_date": trade_date}
+                if api_name == "stk_auction":
+                    params["ts_type"] = "STK"
+                rows = provider.call(api_name, params)
+                datasets[api_name] = [
+                    row
+                    for row in rows
+                    if str(row.get("ts_code") or "") in candidate_codes
+                ]
+            except Exception as exc:  # noqa: BLE001
+                optional_errors[api_name] = f"{type(exc).__name__}: {exc}"
+
     missing = [api for api in SIX_THOUSAND_POINT_APIS if api not in datasets]
     if errors or missing:
         detail = {**errors, **{api: "missing" for api in missing}}
@@ -175,7 +189,8 @@ def capture_six_thousand_signals(
     return {
         "trade_date": trade_date,
         "inventory": list(SIX_THOUSAND_POINT_APIS),
-        "optional_inventory": list(optional_specs),
+        "optional_inventory": list(optional_specs)
+        + (list(AUCTION_CANDIDATE_APIS) if auction_enabled else []),
         "candidate_codes": sorted(candidate_codes),
         "optional_candidate_codes": sorted(optional_candidate_codes),
         "datasets": datasets,
@@ -372,6 +387,7 @@ def build_candidate_premium_features(bundle: dict[str, Any]) -> dict[str, dict[s
             "volume_ratio": volume_ratio,
             "turnover_rate": turnover,
             "amount": amount,
+            "price": price,
         }
 
     closing_rows = _rows_by(list(datasets.get("stk_auction_c") or []), "ts_code")
@@ -384,18 +400,27 @@ def build_candidate_premium_features(bundle: dict[str, Any]) -> dict[str, dict[s
         close_amount = _number(row.get("amount"))
         open_amount = _number(auction_meta.get(code, {}).get("amount"))
         close_open_ratio = close_amount / open_amount if close_amount > 0 and open_amount > 0 else 0.0
+        open_price = _number(auction_meta.get(code, {}).get("price"))
+        close_price = _number(row.get("vwap") or row.get("close"))
+        intraday_change = (
+            (close_price / open_price - 1.0) * 100.0
+            if close_price > 0 and open_price > 0
+            else 0.0
+        )
         day_change = _number(hot_by_code.get(code, {}).get("pct_change"))
         overheat_penalty = max(0.0, day_change - 7.0) * max(0.0, close_open_ratio - 1.0)
+        direction = 1.0 if intraday_change >= 0 else -1.0
         closing_raw[code] = (
-            min(close_open_ratio, 3.0) * 3.0
+            min(close_open_ratio, 3.0) * 3.0 * direction
             + min(log1p(max(0.0, close_amount)) / 4.0, 6.0)
-            + min(max(day_change, 0.0), 5.0) * 0.2
+            + max(-5.0, min(5.0, intraday_change)) * 0.8
             - overheat_penalty
         )
         closing_meta[code] = {
             "amount": close_amount,
             "close_open_amount_ratio": close_open_ratio,
-            "vwap": _number(row.get("vwap")),
+            "vwap": close_price,
+            "intraday_change_pct": intraday_change,
         }
 
     limit_rows = _rows_by(list(datasets.get("kpl_list") or []), "ts_code")
