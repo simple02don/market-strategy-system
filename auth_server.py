@@ -83,13 +83,17 @@ class Handler(BaseHTTPRequestHandler):
             if not self._auth_ok():
                 self._send(401, self._login_page())
                 return
-            files = sorted(REPORT_DIR.glob("market_strategy_*.html"))
+            files = sorted(
+                REPORT_DIR.glob("market_strategy_*.html"),
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            )
             if not files:
                 self._send(200, "<html><body>暂无报告</body></html>".encode())
                 return
             links = "".join(
                 f"<li><a href='{BASE_PATH}/{f.name}'>{f.name}</a></li>"
-                for f in files[-30:]
+                for f in files[:30]
             )
             self._send(200, f"<html><body><ul>{links}</ul></body></html>".encode())
             return
