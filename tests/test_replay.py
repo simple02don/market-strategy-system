@@ -122,6 +122,66 @@ def test_limit_continuation_can_confirm_after_five_minutes():
     assert result["confirm_minutes"] == 5
 
 
+def test_staged_plan_can_confirm_strong_candidate_after_five_minutes():
+    plan = {
+        "version": 3,
+        "type": "staged_vwap",
+        "min_confirm_minutes": 5,
+        "standard_confirm_minutes": 15,
+        "max_open_gap_pct": 0.03,
+        "cancel_open_gap_pct": 0.05,
+        "require_close15_above_vwap": True,
+        "early_max_open_gap_pct": 0.025,
+        "early_min_return_from_open_pct": 0.003,
+        "early_max_return_from_open_pct": 0.04,
+        "early_max_drawdown_from_high_pct": 0.015,
+    }
+    result = replay_candidate(
+        _prediction(entity="600001.SH", execution_plan=plan),
+        _minutes(10.1, [10.11, 10.13, 10.15, 10.17, 10.19]),
+        pre_close=10.0,
+        prev_low=9.5,
+    )
+    assert result["verdict"] == "filled"
+    assert result["confirm_minutes"] == 5
+    assert "早盘强势确认" in result["reason"]
+
+
+def test_staged_plan_falls_back_to_standard_fifteen_minute_confirmation():
+    plan = {
+        "version": 3,
+        "type": "staged_vwap",
+        "min_confirm_minutes": 5,
+        "standard_confirm_minutes": 15,
+        "max_open_gap_pct": 0.03,
+        "cancel_open_gap_pct": 0.05,
+        "require_close15_above_vwap": True,
+        "early_max_open_gap_pct": 0.025,
+        "early_min_return_from_open_pct": 0.003,
+        "early_max_return_from_open_pct": 0.04,
+        "early_max_drawdown_from_high_pct": 0.015,
+    }
+    closes = [10.1] * 14 + [10.2]
+    result = replay_candidate(
+        _prediction(entity="600001.SH", execution_plan=plan),
+        _minutes(10.1, closes),
+        pre_close=10.0,
+        prev_low=9.5,
+    )
+    assert result["verdict"] == "filled"
+    assert result["confirm_minutes"] == 15
+
+
+def test_vwap_infers_share_volume_units():
+    rows = _minutes(10.0, [10.0] * 15)
+    for row in rows:
+        row["amount"] = 10.0 * 1000.0
+    result = replay_candidate(
+        _prediction(entity="600001.SH"), rows, pre_close=10.0, prev_low=9.5
+    )
+    assert result["vwap_15m"] == 10.0
+
+
 def test_limit_continuation_does_not_fake_fill_at_locked_limit():
     plan = {
         "version": 2,

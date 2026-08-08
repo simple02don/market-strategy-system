@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .. import config
 from ..storage import Storage
 
 
@@ -311,13 +312,8 @@ def build_stock_features(
             ~is_st
             & ~symbol.str.startswith(("688", "689", "8", "4", "920", "200", "900"))
         ]
-        symbol = out["ts_code"].str.split(".").str[0]
-        limit = np.where(symbol.str.startswith("30"), 19.8, 9.8)
-        out = out[out["ret1"] < limit - 0.2]
         out = out[
-            (out["circ_mv"] >= 110.0)
-            & (out["pe_ttm"] > 0.0)
-            & (out["pe_ttm"] < 300.0)
+            (out["circ_mv"] >= config.env_float("MIN_CIRC_MV", 50.0))
             & (out["amount20"] >= min_amount / 1e8)
         ]
         listed = pd.to_datetime(out["ts_code"].map(list_dates), format="%Y%m%d", errors="coerce")

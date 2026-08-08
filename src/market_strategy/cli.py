@@ -167,6 +167,7 @@ def cmd_health(args) -> int:
             "last_date": storage._conn.execute("SELECT MAX(trade_date) FROM daily_bar").fetchone()[0],
         }
         report_files = sorted(config.REPORT_DIR.glob("market_strategy_*.html")) if config.REPORT_DIR.exists() else []
+        latest_tail = storage.latest_run("tail-review", str(counts["last_date"] or ""))
         provider = TushareProvider()
         calendar = TradingCalendar(storage, provider)
         calendar_error = ""
@@ -183,11 +184,20 @@ def cmd_health(args) -> int:
                 and latest.get("trade_date") == expected_day.strftime("%Y%m%d")
             )
         )
+        tail_ok = bool(
+            not should_run
+            or (
+                latest_tail
+                and latest_tail.get("status") == "ok"
+                and latest_tail.get("trade_date") == counts["last_date"]
+            )
+        )
         system_status = payload.get("system_status", "unknown")
         healthy = bool(
             latest
             and latest.get("status") == "ok"
             and target_ok
+            and tail_ok
             and (not should_run or system_status == "normal")
         )
         result = {
@@ -195,6 +205,7 @@ def cmd_health(args) -> int:
             "latest_nightly": latest,
             "data": counts,
             "latest_report": report_files[-1].name if report_files else None,
+            "latest_tail_review": latest_tail,
             "expected_target": expected_day.strftime("%Y%m%d") if expected_day else None,
             "system_status": system_status,
             "calendar_error": calendar_error,
@@ -205,6 +216,7 @@ def cmd_health(args) -> int:
                 f"## 市场策略系统健康告警\n"
                 f"> 最近夜间任务：{latest.get('status') if latest else '无记录'}\n"
                 f"> 数据：日线 {counts['daily_rows']} / 最新 {counts['last_date']}\n"
+                f"> 尾盘复评：{latest_tail.get('status') if latest_tail else '无记录'}\n"
                 f"> 请检查 logs/run_nightly.log"
             )
             WeComPusher().send_markdown(alert)

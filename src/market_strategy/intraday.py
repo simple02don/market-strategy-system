@@ -31,19 +31,36 @@ def _payload(row: dict[str, Any]) -> dict[str, Any]:
 def _entry_message(row: dict[str, Any]) -> str:
     payload = _payload(row)
     name = str(row.get("name") or row.get("ts_code") or "")
-    code = str(row.get("ts_code") or "")
-    probability = float(payload.get("probability") or payload.get("model_probability") or 0.0)
+    probability_value = next(
+        (
+            payload.get(key)
+            for key in (
+                "selection_probability",
+                "prob_positive",
+                "probability",
+                "model_probability",
+            )
+            if payload.get(key) is not None
+        ),
+        None,
+    )
+    probability = float(probability_value) if probability_value is not None else None
     score = float(payload.get("score") or 0.0)
     gap = float(row.get("high_open_pct") or 0.0) * 100.0
+    confirm_minutes = int(row.get("confirm_minutes") or 0)
+    confirm_label = "早盘5分钟强势确认" if confirm_minutes and confirm_minutes < 15 else "15分钟标准确认"
+    probability_text = f"{probability:.1%}" if probability is not None else "未提供"
     return (
-        "## 盘中入场信号\n"
-        f"> **{name}（{code}）** 已满足系统入场条件\n"
-        f"> 确认价：**{float(row.get('entry_price') or 0.0):.2f}**　"
-        f"止损价：**{float(row.get('stop_price') or 0.0):.2f}**\n"
-        f"> 开盘涨幅：{gap:+.2f}%　15分钟VWAP：{float(row.get('vwap_15m') or 0.0):.2f}\n"
-        f"> 夜间评分：{score:.1f}　上涨概率：{probability:.1%}\n"
-        f"> 触发规则：{row.get('reason') or row.get('plan_type') or '开盘确认'}\n"
-        "> 这是模型条件触发提醒，不代表保证盈利；请严格执行止损。"
+        "## 盘中模拟入场确认\n"
+        f"**{name}**\n"
+        f"> 已通过：{confirm_label}\n"
+        f"- 模拟确认价：**{float(row.get('entry_price') or 0.0):.2f}**\n"
+        f"- 系统止损价：**{float(row.get('stop_price') or 0.0):.2f}**\n"
+        f"- 开盘涨幅：{gap:+.2f}%\n"
+        f"- 确认窗口VWAP：{float(row.get('vwap_15m') or 0.0):.2f}\n"
+        f"- 夜间评分 / 上涨概率：{score:.1f} / {probability_text}\n"
+        f"- 触发说明：{row.get('reason') or row.get('plan_type') or '开盘确认'}\n\n"
+        "> 这是系统模拟成交提醒，不读取真实账户、不自动下单；涨停封单不视为可成交。"
     )
 
 

@@ -391,7 +391,7 @@ class NightlyPipeline:
             )
             report_path = (
                 config.REPORT_DIR
-                / f"market_strategy_{next_day_str}_{datetime.now():%H%M%S}.html"
+                / f"market_strategy_{next_day_str}_{now_cst():%H%M%S}.html"
             )
             generate_report(payload, report_path)
             payload["report_path"] = str(report_path)
@@ -1051,48 +1051,61 @@ class NightlyPipeline:
         defensive_cands = [
             c for c in candidates if c.get("tier") in {"rebound", "repair", "haven"}
         ]
-        defensive_text = ""
-        if defensive_cands:
-            names = "、".join(
-                f"{c.get('name')}({c.get('ts_code', '').split('.')[0]})"
-                for c in defensive_cands[:3]
-            )
-            defensive_text = (
-                f"\n> 防守机会：{names}"
-                f"（触发：{defensive_cands[0].get('trigger', '')}"
-                f"，仓位{defensive_cands[0].get('position', '')}）"
-            )
-        if candidates:
-            primary = [c for c in candidates if c.get("tier") == "primary"][:5]
-            pick_text = "、".join(
-                f"{c.get('name')}({c.get('ts_code','').split('.')[0]})" for c in primary
-            ) or "无主推荐"
-        else:
-            pick_text = "无合格候选（合法空仓）"
+        recommendations = [
+            candidate
+            for candidate in candidates
+            if candidate.get("tier") in {"primary", "rebound", "repair", "haven"}
+        ][:5]
         mode_label = {
             "dry_run": "干跑",
             "formal_pending": "正式推送中",
             "formal": "正式",
             "push_failed": "推送失败",
         }.get(str(payload.get("run_mode") or ""), "未知")
-        continuation_text = "、".join(
-            f"{item.get('ts_code','').split('.')[0]}:{'涨' if item.get('direction') == 'rise' else '不涨'}"
-            for item in continuations
-        ) or "无"
-        return (
+        lines = [
             f"## 主力策略情景推演 · 目标日{payload.get('next_trade_date')}\n"
             f"> 数据截止：{payload.get('trade_date')} · 运行：{mode_label}\n"
             f"> 市场状态：{state.get('label')}\n"
             f"> 次日情景：{scenario_text}\n"
             f"> 强势板块：{sector_text}\n"
             f"> 行为假设：{hypothesis_text}（证据置信度 {float(evidence.get('confidence', 0)) * 100:.0f}%）\n"
-            f"{lhb_text}\n"
-            f"{forecast_text}\n"
-            f"{defensive_text}\n"
-            f"> 热榜新推荐：{pick_text}\n"
-            f"> 续跟踪：{continuation_text}\n"
-            f"> 系统状态：{payload.get('system_status')}\n"
-            f"> 决策时点 {payload.get('decision_time')} · 信息截止 {payload.get('information_cutoff')}\n"
-            f"> [完整日报]({link})（公网/内网均可打开）\n"
-            "> 仅供研究推演，不构成投资建议；不自动下单。"
+            f"{lhb_text}{forecast_text}"
+        ]
+        lines.append("\n### 次日新推荐")
+        if not recommendations:
+            lines.append("> 无合格候选，系统保持空仓观察。")
+        for candidate in recommendations:
+            intent = candidate.get("stock_intent") or {}
+            probability = candidate.get("selection_probability", candidate.get("prob_positive"))
+            probability_text = f"{float(probability):.1%}" if probability is not None else "未提供"
+            lines.extend(
+                [
+                    f"\n**{candidate.get('name') or '未命名股票'}**",
+                    f"- 定位：{candidate.get('role') or '—'} · {candidate.get('industry') or '行业未知'}",
+                    f"- 评分 / 上涨概率：{float(candidate.get('score') or 0):.1f} / {probability_text}",
+                    f"- 入场：{candidate.get('confirm_conditions') or '等待盘中确认'}",
+                    f"- 放弃：{candidate.get('cancel_conditions') or '未满足确认条件则不成交'}",
+                    f"- 主要风险：{intent.get('risks') or candidate.get('valuation_risk') or '按系统止损执行'}",
+                ]
+            )
+        lines.append("\n### 系统模拟持仓")
+        if not continuations:
+            lines.append("> 无持续跟踪标的。")
+        for item in continuations:
+            conclusion = "看涨" if item.get("direction") == "rise" else "不看涨/防守"
+            lines.extend(
+                [
+                    f"\n**{item.get('name') or '未命名股票'}**",
+                    f"- 次日判断：{conclusion}",
+                    f"- 参考价 / 止损：{float(item.get('reference_price') or 0):.2f} / {float(item.get('stop_loss_price') or 0):.2f}",
+                    f"- 依据：{item.get('reason') or '持续跟踪规则'}",
+                ]
+            )
+        lines.extend(
+            [
+                f"\n> 系统状态：{payload.get('system_status')} · 决策时点 {payload.get('decision_time')}",
+                f"> [查看完整日报]({link})（仅内网 / WireGuard 可访问）",
+                "> 系统只维护模拟持仓，不读取真实账户、不自动下单；仅供研究参考。",
+            ]
         )
+        return "\n".join(lines)

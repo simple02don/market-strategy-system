@@ -117,6 +117,33 @@ def select_fresh_recommendations(
                 },
             }
         )
+        plan = dict(item.get("execution_plan") or {})
+        if (
+            plan.get("type") == "standard_vwap15"
+            and score >= config.env_float("EARLY_ENTRY_MIN_SCORE", 70.0)
+            and probability is not None
+            and float(probability) >= config.env_float("EARLY_ENTRY_MIN_PROBABILITY", 0.66)
+            and one_day_risk <= config.env_float("EARLY_ENTRY_MAX_ONE_DAY_RISK", 0.40)
+            and persistence >= config.env_float("EARLY_ENTRY_MIN_PERSISTENCE", 0.60)
+            and stage not in {"高潮", "派发", "砸盘"}
+        ):
+            item["execution_plan"] = {
+                **plan,
+                "version": 3,
+                "type": "staged_vwap",
+                "min_confirm_minutes": 5,
+                "standard_confirm_minutes": 15,
+                "early_max_open_gap_pct": 0.025,
+                "early_min_return_from_open_pct": 0.003,
+                "early_max_return_from_open_pct": 0.04,
+                "early_max_drawdown_from_high_pct": 0.015,
+            }
+            item["confirm_conditions"] = (
+                "高质量候选可在开盘5分钟后先做强势确认；未通过则继续等待15分钟VWAP标准确认"
+            )
+            item["cancel_conditions"] = (
+                "早盘拉升过快或冲高回落不追；高开>5%、封死涨停或低开破前日低点放弃"
+            )
         selected.append(item)
         if len(selected) >= limit:
             break

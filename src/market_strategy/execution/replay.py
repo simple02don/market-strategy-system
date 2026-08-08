@@ -8,6 +8,7 @@ from typing import Any
 from .. import config
 from ..providers.minute_source import fetch_minute_bars
 from ..storage import Storage
+from .minute_metrics import inferred_vwap, normalized_minute_rows
 
 
 def _execution_plan(prediction: dict[str, Any]) -> dict[str, Any]:
@@ -86,6 +87,7 @@ def replay_candidate(
     }
     if plan_type == "observe_only":
         return {**base, "verdict": "canceled", "reason": "观察/回避层级不执行"}
+    minute_rows = normalized_minute_rows(minute_rows)
     if not minute_rows or pre_close <= 0:
         return {**base, "verdict": "no_data", "reason": "minute_data_unavailable"}
 
@@ -93,13 +95,7 @@ def replay_candidate(
     high_open_pct = open_price / pre_close - 1.0 if pre_close else 0.0
     min_confirm_minutes = max(1, int(plan.get("min_confirm_minutes", 15) or 15))
     latest_confirm_time = str(plan.get("latest_confirm_time") or "10:15")
-    eligible_rows = [
-        row
-        for row in minute_rows
-        if str(row.get("trade_time") or "")[11:16] <= latest_confirm_time
-    ]
-    if not eligible_rows:
-        eligible_rows = minute_rows
+    eligible_rows = normalized_minute_rows(minute_rows, latest_time=latest_confirm_time)
     if len(eligible_rows) < min_confirm_minutes:
         return {
             **base,
@@ -135,13 +131,7 @@ def replay_candidate(
     last_reason = "尚未满足确认条件"
     for confirm_minutes in range(min_confirm_minutes, len(eligible_rows) + 1):
         window = eligible_rows[:confirm_minutes]
-        total_amount = sum(float(row.get("amount") or 0.0) for row in window)
-        total_vol = sum(float(row.get("vol") or 0.0) for row in window)
-        vwap = (
-            total_amount / (total_vol * 100.0)
-            if total_vol > 0
-            else sum(float(row.get("close") or 0.0) for row in window) / len(window)
-        )
+        vwap = inferred_vwap(window)
         close_price = float(window[-1].get("close") or 0.0)
         high_price = max(float(row.get("high") or row.get("close") or 0.0) for row in window)
         low_price = min(float(row.get("low") or row.get("close") or 0.0) for row in window)
@@ -160,6 +150,27 @@ def replay_candidate(
             "confirm_minutes": confirm_minutes,
         }
         last_common = common
+        if plan_type == "staged_vwap":
+            standard_minutes = int(plan.get("standard_confirm_minutes", 15) or 15)
+            if confirm_minutes < standard_minutes:
+                early_max_gap = float(plan.get("early_max_open_gap_pct", 0.025) or 0.025)
+                return_from_open = close_price / open_price - 1.0 if open_price > 0 else 0.0
+                drawdown_from_high = close_price / high_price - 1.0 if high_price > 0 else 0.0
+                if high_open_pct > early_max_gap:
+                    last_reason = "早确认阶段开盘涨幅过高，等待15分钟标准确认"
+                    continue
+                if close_price <= open_price:
+                    last_reason = "早确认阶段未保持开盘价上方"
+                    continue
+                if return_from_open < float(plan.get("early_min_return_from_open_pct", 0.003) or 0.003):
+                    last_reason = "早确认阶段涨幅不足"
+                    continue
+                if return_from_open > float(plan.get("early_max_return_from_open_pct", 0.04) or 0.04):
+                    last_reason = "早确认阶段拉升过快，不追价"
+                    continue
+                if drawdown_from_high < -float(plan.get("early_max_drawdown_from_high_pct", 0.015) or 0.015):
+                    last_reason = "早确认阶段冲高回落过大"
+                    continue
         if plan_type == "haven_vwap15_ma20" and low_price < float(min_price):
             last_reason = "确认窗口跌破前日MA20"
             continue
@@ -180,7 +191,11 @@ def replay_candidate(
             **common,
             "verdict": "filled",
             "entry_price": round(close_price, 4),
-            "reason": f"{plan_type}在第{confirm_minutes}分钟满足全部确认条件",
+            "reason": (
+                f"双阶段计划在第{confirm_minutes}分钟完成早盘强势确认"
+                if plan_type == "staged_vwap" and confirm_minutes < int(plan.get("standard_confirm_minutes", 15) or 15)
+                else f"{plan_type}在第{confirm_minutes}分钟满足全部确认条件"
+            ),
         }
     return {**last_common, "verdict": "not_filled", "reason": last_reason}
 

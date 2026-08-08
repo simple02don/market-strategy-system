@@ -43,6 +43,8 @@ def _minutes(code="600001.SH", closes=None):
     rows = []
     for index, close in enumerate(closes):
         stamp = start + timedelta(minutes=index)
+        if stamp.time() > datetime(2026, 8, 6, 11, 30).time():
+            stamp += timedelta(minutes=90)
         rows.append(
             {
                 "ts_code": code,

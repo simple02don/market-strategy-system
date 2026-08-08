@@ -13,6 +13,7 @@ from .providers.minute_source import fetch_minute_bars
 from .push.wecom import WeComPusher
 from .storage import Storage
 from .timeutil import now_cst
+from .execution.minute_metrics import inferred_vwap, normalized_minute_rows
 
 
 MinuteFetcher = Callable[[str, str], list[dict[str, Any]]]
@@ -44,19 +45,14 @@ def _upper_limit_price(ts_code: str, pre_close: float) -> float:
 
 
 def _minute_metrics(rows: list[dict[str, Any]]) -> dict[str, float] | None:
+    rows = normalized_minute_rows(rows)
     if not rows:
         return None
-    total_vol = sum(float(row.get("vol") or 0.0) for row in rows)
-    total_amount = sum(float(row.get("amount") or 0.0) for row in rows)
     closes = [float(row.get("close") or 0.0) for row in rows]
     highs = [float(row.get("high") or row.get("close") or 0.0) for row in rows]
     if not closes or closes[-1] <= 0:
         return None
-    vwap = (
-        total_amount / (total_vol * 100.0)
-        if total_vol > 0
-        else sum(closes) / len(closes)
-    )
+    vwap = inferred_vwap(rows)
     anchor = closes[-31] if len(closes) >= 31 else closes[0]
     last_30m_return = closes[-1] / anchor - 1.0 if anchor > 0 else 0.0
     high = max(highs)
@@ -95,13 +91,15 @@ def _latest_formal_candidates(storage: Storage, trade_date: str) -> list[dict[st
 def _hot_discovery_eligible(storage: Storage, ts_code: str, trade_date: str) -> bool:
     row = storage._conn.execute(
         """
-        SELECT s.name, s.list_date, b.circ_mv, d.amount
+        SELECT s.name, s.list_date, b.circ_mv,
+          (SELECT AVG(amount) FROM (
+             SELECT amount FROM daily_bar
+             WHERE ts_code=s.ts_code AND trade_date<?
+             ORDER BY trade_date DESC LIMIT 20
+          )) AS avg_amount
         FROM stock_basic s
         LEFT JOIN daily_basic b ON b.ts_code=s.ts_code AND b.trade_date=(
           SELECT MAX(trade_date) FROM daily_basic WHERE ts_code=s.ts_code AND trade_date<?
-        )
-        LEFT JOIN daily_bar d ON d.ts_code=s.ts_code AND d.trade_date=(
-          SELECT MAX(trade_date) FROM daily_bar WHERE ts_code=s.ts_code AND trade_date<?
         )
         WHERE s.ts_code=? AND s.list_status='L' AND s.is_open=1
         """,
@@ -113,8 +111,17 @@ def _hot_discovery_eligible(storage: Storage, ts_code: str, trade_date: str) -> 
     name = str(row["name"] or "")
     if "ST" in name.upper() or "退" in name or symbol.startswith(("688", "689", "8", "4", "920", "200", "900")):
         return False
+    try:
+        listed_days = (
+            datetime.strptime(trade_date, "%Y%m%d")
+            - datetime.strptime(str(row["list_date"] or ""), "%Y%m%d")
+        ).days
+    except ValueError:
+        return False
+    if listed_days < 60:
+        return False
     circ_mv_yi = float(row["circ_mv"] or 0.0) / 1e4
-    amount_yuan = float(row["amount"] or 0.0) * 1000.0
+    amount_yuan = float(row["avg_amount"] or 0.0) * 1000.0
     return circ_mv_yi >= config.env_float("MIN_CIRC_MV", 50) and amount_yuan >= config.env_float(
         "MIN_AMOUNT_20D", 1.5e8
     )
@@ -123,25 +130,46 @@ def _hot_discovery_eligible(storage: Storage, ts_code: str, trade_date: str) -> 
 def _message(result: dict[str, Any]) -> str:
     entries = result.get("entries") or []
     positions = result.get("positions") or []
-    lines = ["## 热门股尾盘复评", f"> 复评时间：{result.get('decision_time', '')}"]
+    lines = ["## 热门股尾盘模拟复评", f"> 数据时点：{result.get('decision_time', '')}"]
     if entries:
-        lines.append("\n**尾盘入场机会**")
+        lines.append("\n### 尾盘模拟入场")
         for item in entries:
-            lines.append(
-                f"> {item['name']}（{item['ts_code']}） 现价{item['price']:.2f} "
-                f"/ 热榜#{item['hot_rank']} / 止损{item['stop_price']:.2f}"
+            source = (
+                "夜间正式候选复评"
+                if item.get("selection_type") != "intraday_hot_discovery"
+                else "尾盘热榜新发现（规则信号，非夜间模型）"
+            )
+            probability = item.get("probability")
+            probability_text = f"{float(probability):.1%}" if probability is not None else "不适用"
+            lines.extend(
+                [
+                    f"\n**{item['name']}**",
+                    f"- 信号来源：{source}",
+                    f"- 现价 / 系统止损：{item['price']:.2f} / {item['stop_price']:.2f}",
+                    f"- 热榜位置 / 当日涨幅：第{item['hot_rank']}名 / {item['pct_change']:+.2f}%",
+                    f"- 夜间上涨概率：{probability_text}",
+                ]
             )
     else:
-        lines.append("\n> 当前没有满足条件的尾盘新入场机会。")
+        lines.append("\n> 当前没有满足条件的尾盘模拟入场机会。")
     if positions:
-        lines.append("\n**系统模拟持仓复评**")
-        labels = {"hold": "继续持有", "reduce": "考虑减仓", "exit": "退出", "hold_t1": "T+1锁定，次日优先退出"}
+        lines.append("\n### 系统模拟持仓")
+        labels = {
+            "hold": "继续持有",
+            "reduce": "转弱，建议降低关注级别（系统仍按持有跟踪）",
+            "exit": "系统模拟退出",
+            "hold_t1": "当日新开仓受T+1约束，次日优先退出",
+        }
         for item in positions:
-            lines.append(
-                f"> {item['name']}（{item['ts_code']}）：{labels[item['action']]}，"
-                f"现价{item['price']:.2f}，较日内高点{item['drawdown_from_high']:.1%}"
+            lines.extend(
+                [
+                    f"\n**{item['name']}**",
+                    f"- 结论：{labels[item['action']]}",
+                    f"- 现价 / 系统止损：{item['price']:.2f} / {item['stop_price']:.2f}",
+                    f"- 距日内高点：{item['drawdown_from_high']:.1%}",
+                ]
             )
-    lines.append("\n> 系统仅维护模拟持仓并输出参考信号，不读取真实账户。")
+    lines.append("\n> 仅维护系统模拟持仓，不读取真实账户、不自动下单；尾盘新开仓当日不能卖出。")
     return "\n".join(lines)
 
 
@@ -210,8 +238,8 @@ def run_tail_review(
                     "entity": code,
                     "name": str(item.get("ts_name") or code),
                     "payload": {
-                        "score": 70.0,
-                        "probability": 0.55,
+                        "score": 0.0,
+                        "selection_probability": None,
                         "selection_type": "intraday_hot_discovery",
                     },
                 }
@@ -243,17 +271,34 @@ def run_tail_review(
                 continue
             payload = _payload(candidate.get("payload"))
             rank = int(hot.get("rank") or 100)
-            score = float(payload.get("score") or 0.0) + (101 - rank) * 0.10
+            selection_type = str(payload.get("selection_type") or "nightly_recheck")
+            if selection_type == "intraday_hot_discovery":
+                score = (101 - rank) * 0.70 + max(0.0, min(pct_change, 8.5)) * 3.0
+            else:
+                score = float(payload.get("score") or 0.0) + (101 - rank) * 0.10
+            probability_value = next(
+                (
+                    payload.get(key)
+                    for key in (
+                        "selection_probability",
+                        "prob_positive",
+                        "probability",
+                        "model_probability",
+                    )
+                    if payload.get(key) is not None
+                ),
+                None,
+            )
             entry_pool.append(
                 {
                     "ts_code": code,
                     "name": str(candidate.get("name") or hot.get("ts_name") or code),
                     "source_prediction_id": int(candidate.get("id") or 0),
-                    "selection_type": str(payload.get("selection_type") or "nightly_recheck"),
+                    "selection_type": selection_type,
                     "hot_rank": rank,
                     "pct_change": pct_change,
                     "score": round(score, 1),
-                    "probability": float(payload.get("probability") or payload.get("model_probability") or 0.0),
+                    "probability": float(probability_value) if probability_value is not None else None,
                     "stop_price": round(max(float(payload.get("stop_loss_price") or 0.0), metrics["price"] * 0.94), 2),
                     **metrics,
                 }

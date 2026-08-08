@@ -66,6 +66,39 @@ def test_fresh_recommendation_rejects_high_one_day_risk():
     assert all(0 < item["stop_loss_price"] < item["reference_close"] for item in selected)
 
 
+def test_high_quality_fresh_candidate_gets_two_stage_entry_plan(monkeypatch):
+    monkeypatch.setenv("MIN_PREMIUM_FACTOR_COVERAGE", "0.6")
+    code = "600001.SH"
+    bars = _bars([code], [f"202607{day:02d}" for day in range(1, 21)])
+    candidates = [
+        {
+            "ts_code": code,
+            "name": "早盘强势",
+            "score": 82,
+            "prob_positive": 0.70,
+            "one_day_risk": 0.25,
+            "stock_intent": {
+                "next_day_up_probability": 0.70,
+                "one_day_risk": 0.25,
+                "catalyst_persistence": 0.72,
+                "stage": "发酵",
+            },
+            "premium_features": {"factor_coverage": 0.9},
+            "execution_plan": {
+                "version": 2,
+                "type": "standard_vwap15",
+                "min_confirm_minutes": 15,
+                "max_open_gap_pct": 0.03,
+                "cancel_open_gap_pct": 0.05,
+            },
+        }
+    ]
+    selected = select_fresh_recommendations(candidates, bars, "20260720")
+    assert selected[0]["execution_plan"]["type"] == "staged_vwap"
+    assert selected[0]["execution_plan"]["min_confirm_minutes"] == 5
+    assert "继续等待15分钟" in selected[0]["confirm_conditions"]
+
+
 def test_fresh_recommendations_do_not_fill_quota_with_weak_candidates(monkeypatch):
     monkeypatch.setenv("FRESH_MIN_SCORE", "70")
     codes = ["600001.SH", "600002.SH", "600003.SH"]
