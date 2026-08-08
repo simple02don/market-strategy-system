@@ -97,6 +97,13 @@ def _git_commit() -> str:
         return "unknown"
 
 
+def _display_value(value: Any, fallback: str = "—") -> str:
+    if isinstance(value, (list, tuple, set)):
+        text = "；".join(str(item) for item in value if item not in (None, ""))
+        return text or fallback
+    return str(value) if value not in (None, "") else fallback
+
+
 def _dataset_data_day(payload: str | None) -> str | None:
     """从预测 payload 的 dataset_version 提取数据日（live_YYYYMMDD_... / nightly_YYYYMMDD_...）。"""
     try:
@@ -109,10 +116,28 @@ def _dataset_data_day(payload: str | None) -> str | None:
     return None
 
 
-def _existing_report_is_fresh(payload: str | None, latest_str: str) -> bool:
-    """已有正式报告的数据日不旧于本次可用数据日时，才允许防重跳过。"""
+def _existing_report_is_fresh(
+    payload: str | None,
+    latest_str: str,
+    *,
+    current_time: datetime | None = None,
+) -> bool:
+    """数据日与资讯截止都足够新时才允许防重跳过。"""
     data_day = _dataset_data_day(payload)
-    return data_day is None or data_day >= latest_str
+    if data_day is not None and data_day < latest_str:
+        return False
+    if not payload:
+        return True
+    try:
+        body = json.loads(payload)
+        cutoff_text = str(body.get("information_cutoff") or "")
+        if not cutoff_text:
+            return True
+        cutoff = datetime.strptime(cutoff_text[:19], "%Y-%m-%d %H:%M:%S")
+        age_hours = ((current_time or now_cst()) - cutoff).total_seconds() / 3600.0
+        return age_hours <= config.env_float("FORMAL_REPORT_MAX_INFO_AGE_HOURS", 12.0)
+    except (TypeError, ValueError):
+        return False
 
 
 def _dataset_version(trade_date: str, label: str) -> str:
@@ -269,7 +294,9 @@ class NightlyPipeline:
                 """,
                 (next_day_str,),
             ).fetchone()
-            if existing and _existing_report_is_fresh(existing["payload"], latest_str):
+            if existing and _existing_report_is_fresh(
+                existing["payload"], latest_str, current_time=now_cst()
+            ):
                 return {
                     "status": "skip",
                     "reason": "formal_report_already_exists",
@@ -629,6 +656,7 @@ class NightlyPipeline:
                 latest_str,
                 active_codes=self.storage.tracked_or_pending_codes(),
                 limit=config.env_int("FRESH_RECOMMENDATION_COUNT", 5),
+                defensive_mode=defensive_mode,
             )
         elif defensive_mode:
             repair_mode = bool(
@@ -744,8 +772,6 @@ class NightlyPipeline:
             "forecast": STAGE_PLAYBOOK.get(forecast_stage, {}),
         }
         model_version_effective = f"{model_version_effective}+intent_v3+stock_intent_v1"
-        latest_dt = datetime.strptime(latest_str, "%Y%m%d")
-        next_dt = datetime.strptime(next_day_str, "%Y%m%d")
         data_ok = (
             int(update_result.get("daily", 0)) >= config.env_int("MIN_DAILY_ROWS", 3000)
             and int(update_result.get("basic", 0)) >= config.env_int("MIN_BASIC_ROWS", 2500)
@@ -799,10 +825,19 @@ class NightlyPipeline:
             for scenario in scenarios:
                 scenario["abstain"] = True
         evidence["operator_hypotheses"] = infer_operator_playbook(context, evidence, sectors)
+        stale_sessions = int(
+            self.storage._conn.execute(
+                """
+                SELECT COUNT(*) FROM trade_cal
+                WHERE is_open=1 AND cal_date>? AND cal_date<?
+                """,
+                (latest_str, next_day_str),
+            ).fetchone()[0]
+        )
         payload = {
             "trade_date": latest_str,
             "next_trade_date": next_day_str,
-            "stale_days": (next_dt - latest_dt).days,
+            "stale_days": stale_sessions,
             "system_status": system_status,
             "market_context": context,
             "market_state": state,
@@ -1045,7 +1080,7 @@ class NightlyPipeline:
         intent_forecast = payload.get("intent_forecast") or {}
         target_sectors = payload.get("target_sectors") or []
         forecast_text = (
-            f"\n> 主力预判：{intent_forecast.get('label', '—')}"
+            f"\n> 资金阶段预判：{intent_forecast.get('label', '—')}"
             f"（目标：{'、'.join(target_sectors) or '防守'}）"
         )
         defensive_cands = [
@@ -1063,7 +1098,7 @@ class NightlyPipeline:
             "push_failed": "推送失败",
         }.get(str(payload.get("run_mode") or ""), "未知")
         lines = [
-            f"## 主力策略情景推演 · 目标日{payload.get('next_trade_date')}\n"
+            f"## 资金行为情景推演 · 目标日{payload.get('next_trade_date')}\n"
             f"> 数据截止：{payload.get('trade_date')} · 运行：{mode_label}\n"
             f"> 市场状态：{state.get('label')}\n"
             f"> 次日情景：{scenario_text}\n"
@@ -1082,10 +1117,10 @@ class NightlyPipeline:
                 [
                     f"\n**{candidate.get('name') or '未命名股票'}**",
                     f"- 定位：{candidate.get('role') or '—'} · {candidate.get('industry') or '行业未知'}",
-                    f"- 评分 / 上涨概率：{float(candidate.get('score') or 0):.1f} / {probability_text}",
+                    f"- 评分 / 估计上涨概率：{float(candidate.get('score') or 0):.1f} / {probability_text}",
                     f"- 入场：{candidate.get('confirm_conditions') or '等待盘中确认'}",
                     f"- 放弃：{candidate.get('cancel_conditions') or '未满足确认条件则不成交'}",
-                    f"- 主要风险：{intent.get('risks') or candidate.get('valuation_risk') or '按系统止损执行'}",
+                    f"- 主要风险：{_display_value(intent.get('risks') or candidate.get('valuation_risk'), '按系统止损执行')}",
                 ]
             )
         lines.append("\n### 系统模拟持仓")
@@ -1104,7 +1139,7 @@ class NightlyPipeline:
         lines.extend(
             [
                 f"\n> 系统状态：{payload.get('system_status')} · 决策时点 {payload.get('decision_time')}",
-                f"> [查看完整日报]({link})（仅内网 / WireGuard 可访问）",
+                f"> [查看完整日报]({link})",
                 "> 系统只维护模拟持仓，不读取真实账户、不自动下单；仅供研究参考。",
             ]
         )

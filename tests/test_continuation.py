@@ -114,6 +114,46 @@ def test_fresh_recommendations_do_not_fill_quota_with_weak_candidates(monkeypatc
     assert [item["ts_code"] for item in selected] == [codes[0]]
 
 
+def test_fresh_recommendations_apply_final_industry_cap(monkeypatch):
+    monkeypatch.setenv("FINAL_MAX_SAME_INDUSTRY", "2")
+    codes = ["600001.SH", "600002.SH", "600003.SH", "600004.SH"]
+    bars = _bars(codes, [f"202607{day:02d}" for day in range(1, 21)])
+    candidates = [
+        {"ts_code": codes[0], "industry": "铜", "score": 90},
+        {"ts_code": codes[1], "industry": "铜", "score": 89},
+        {"ts_code": codes[2], "industry": "铜", "score": 88},
+        {"ts_code": codes[3], "industry": "通信", "score": 87},
+    ]
+
+    selected = select_fresh_recommendations(candidates, bars, "20260720", limit=4)
+
+    assert [item["ts_code"] for item in selected] == [codes[0], codes[1], codes[3]]
+
+
+def test_defensive_hot_selection_raises_thresholds_and_concentration_control(monkeypatch):
+    monkeypatch.setenv("DEFENSIVE_FRESH_MIN_SCORE", "66")
+    monkeypatch.setenv("DEFENSIVE_FRESH_MIN_PROBABILITY", "0.60")
+    monkeypatch.setenv("DEFENSIVE_MAX_ONE_DAY_RISK", "0.40")
+    monkeypatch.setenv("DEFENSIVE_MAX_SAME_INDUSTRY", "1")
+    monkeypatch.setenv("DEFENSIVE_FRESH_MAX", "3")
+    codes = ["600001.SH", "600002.SH", "600003.SH", "600004.SH"]
+    bars = _bars(codes, [f"202607{day:02d}" for day in range(1, 21)])
+    candidates = [
+        {"ts_code": codes[0], "industry": "铜", "score": 70, "prob_positive": 0.65, "one_day_risk": 0.20},
+        {"ts_code": codes[1], "industry": "铜", "score": 69, "prob_positive": 0.66, "one_day_risk": 0.20},
+        {"ts_code": codes[2], "industry": "通信", "score": 65, "prob_positive": 0.70, "one_day_risk": 0.20},
+        {"ts_code": codes[3], "industry": "软件", "score": 75, "prob_positive": 0.70, "one_day_risk": 0.50},
+    ]
+
+    selected = select_fresh_recommendations(
+        candidates, bars, "20260720", limit=5, defensive_mode=True
+    )
+
+    assert [item["ts_code"] for item in selected] == [codes[0]]
+    assert selected[0]["selection_type"] == "fresh_hot100_defensive"
+    assert selected[0]["selection_checks"]["defensive_mode"] is True
+
+
 def test_tracking_continues_after_wrong_not_rise_call_and_stops_on_stop_loss(tmp_path):
     storage = Storage(tmp_path / "tracking.db")
     run_id = storage.start_run("nightly", "20260806")

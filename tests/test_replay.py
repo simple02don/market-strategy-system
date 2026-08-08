@@ -417,6 +417,75 @@ def test_outcome_uses_confirmed_entry_instead_of_open_proxy(tmp_path):
         "SELECT ret_next, measurement FROM candidate_outcome WHERE prediction_id=?",
         (prediction_id,),
     ).fetchone()
-    assert round(row["ret_next"], 4) == round((11.0 / 10.5 - 1.0) * 100.0, 4)
+    assert round(row["ret_next"], 4) == round((11.0 / 10.5 - 1.0) * 100.0 - 0.4, 4)
     assert row["measurement"] == "trigger_entry_to_close_after_cost"
+    storage.close()
+
+
+def test_track_outcomes_settles_intraday_filled_replay_at_daily_close(tmp_path):
+    storage = Storage(tmp_path / "settlement.db")
+    storage.upsert_stock_basic(
+        [{"ts_code": "600489.SH", "name": "测试黄金", "industry": "黄金"}]
+    )
+    storage.upsert_daily_bars(
+        [
+            {
+                "ts_code": "600489.SH",
+                "trade_date": "20260805",
+                "open": 10.0,
+                "high": 10.0,
+                "low": 9.8,
+                "close": 10.0,
+                "pre_close": 9.9,
+                "pct_chg": 1.01,
+            },
+            {
+                "ts_code": "600489.SH",
+                "trade_date": "20260806",
+                "open": 10.1,
+                "high": 11.2,
+                "low": 10.0,
+                "close": 11.0,
+                "pre_close": 10.0,
+                "pct_chg": 10.0,
+            },
+        ],
+        "fixture",
+    )
+    run_id = storage.start_run("nightly", "20260806")
+    prediction_id = storage.save_prediction(
+        run_id=run_id,
+        trade_date="20260806",
+        decision_time="2026-08-05 23:00:00",
+        information_cutoff="2026-08-05 23:00:00",
+        dataset_version="fixture",
+        model_version="rule_v1",
+        category="candidate",
+        entity="600489.SH",
+        payload={"tier": "primary", "score": 80},
+        is_formal=True,
+    )
+    storage.save_execution_replay(
+        {
+            "prediction_id": prediction_id,
+            "trade_date": "20260806",
+            "ts_code": "600489.SH",
+            "verdict": "filled",
+            "entry_price": 10.5,
+            "exit_price": None,
+            "reason": "盘中确认",
+            "source": "fixture",
+        }
+    )
+    storage.upsert_minute_bars(_minutes(10.1, [10.2] * 15 + [11.0]))
+
+    result = track_outcomes(storage, "20260806")
+
+    assert result["tracked"] == 1
+    replay = storage._conn.execute(
+        "SELECT entry_price, exit_price FROM execution_replay WHERE prediction_id=?",
+        (prediction_id,),
+    ).fetchone()
+    assert replay["entry_price"] == 10.5
+    assert replay["exit_price"] == 11.0
     storage.close()

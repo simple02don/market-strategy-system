@@ -48,6 +48,10 @@ def _resolve_target_data_day(target_day: date, latest_trading_day) -> date | Non
     return latest_trading_day(target_day - timedelta(days=1))
 
 
+def _tail_review_required(last_data_date: str | None, current: datetime) -> bool:
+    return bool(last_data_date and str(last_data_date) == current.strftime("%Y%m%d"))
+
+
 def cmd_check_calendar(args) -> int:
     with Storage() as storage:
         provider = TushareProvider()
@@ -143,6 +147,7 @@ def cmd_train_log(args) -> int:
 
 def cmd_health(args) -> int:
     with Storage() as storage:
+        current = now_cst()
         latest = storage.latest_run("nightly")
         payload = {}
         if latest:
@@ -175,6 +180,9 @@ def cmd_health(args) -> int:
             else []
         )
         latest_tail = storage.latest_run("tail-review", str(counts["last_date"] or ""))
+        unsettled_executions = storage.unsettled_execution_count(
+            str(counts["last_date"] or "")
+        )
         provider = TushareProvider()
         calendar = TradingCalendar(storage, provider)
         calendar_error = ""
@@ -191,8 +199,9 @@ def cmd_health(args) -> int:
                 and latest.get("trade_date") == expected_day.strftime("%Y%m%d")
             )
         )
+        tail_required = _tail_review_required(counts["last_date"], current)
         tail_ok = bool(
-            not should_run
+            not tail_required
             or (
                 latest_tail
                 and latest_tail.get("status") == "ok"
@@ -205,6 +214,7 @@ def cmd_health(args) -> int:
             and latest.get("status") == "ok"
             and target_ok
             and tail_ok
+            and unsettled_executions == 0
             and (not should_run or system_status == "normal")
         )
         result = {
@@ -213,6 +223,8 @@ def cmd_health(args) -> int:
             "data": counts,
             "latest_report": report_files[-1].name if report_files else None,
             "latest_tail_review": latest_tail,
+            "tail_review_required": tail_required,
+            "unsettled_executions": unsettled_executions,
             "expected_target": expected_day.strftime("%Y%m%d") if expected_day else None,
             "system_status": system_status,
             "calendar_error": calendar_error,
@@ -224,6 +236,7 @@ def cmd_health(args) -> int:
                 f"> 最近夜间任务：{latest.get('status') if latest else '无记录'}\n"
                 f"> 数据：日线 {counts['daily_rows']} / 最新 {counts['last_date']}\n"
                 f"> 尾盘复评：{latest_tail.get('status') if latest_tail else '无记录'}\n"
+                f"> 已成交未结算回放：{unsettled_executions}\n"
                 f"> 请检查 logs/run_nightly.log"
             )
             WeComPusher().send_markdown(alert)

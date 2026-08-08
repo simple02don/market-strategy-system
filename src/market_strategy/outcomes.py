@@ -76,13 +76,12 @@ def track_outcomes(storage: Storage, max_data_date: str) -> dict:
                 exit_price = float(execution["exit_price"] or 0.0)
                 if entry <= 0 or exit_price <= 0:
                     continue
-                ret_next = (exit_price / entry - 1.0) * 100.0
-                cost_pp = roundtrip_cost_pp
+                gross_ret = (exit_price / entry - 1.0) * 100.0
+                ret_next = gross_ret - roundtrip_cost_pp
                 measurement = "trigger_entry_to_close_after_cost"
             else:
                 # 确认条件未触发即保持现金，不虚构一笔开盘成交。
                 ret_next = 0.0
-                cost_pp = 0.0
                 measurement = "trigger_not_executed_cash"
             industry = industry_of(record["entity"])
             industry_ret_next = float(industry_ret.get(industry, market_ret))
@@ -96,7 +95,7 @@ def track_outcomes(storage: Storage, max_data_date: str) -> dict:
                     "ret_next": ret_next,
                     "industry_ret_next": industry_ret_next,
                     "market_ret_next": market_ret,
-                    "excess": ret_next - industry_ret_next - cost_pp,
+                    "excess": ret_next - industry_ret_next,
                     "measurement": measurement,
                 }
             )

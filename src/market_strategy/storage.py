@@ -312,6 +312,7 @@ CREATE TABLE IF NOT EXISTS execution_replay (
   exit_price REAL,
   reason TEXT,
   source TEXT,
+  settled_at TEXT,
   created_at TEXT NOT NULL
 );
 
@@ -412,6 +413,8 @@ class Storage:
         }
         if "plan_type" not in replay_columns:
             self._conn.execute("ALTER TABLE execution_replay ADD COLUMN plan_type TEXT")
+        if "settled_at" not in replay_columns:
+            self._conn.execute("ALTER TABLE execution_replay ADD COLUMN settled_at TEXT")
         tracking_columns = {
             str(row[1]) for row in self._conn.execute("PRAGMA table_info(tracking_position)").fetchall()
         }
@@ -1700,13 +1703,28 @@ class Storage:
               )
               AND id NOT IN (
                 SELECT prediction_id FROM execution_replay
-                WHERE verdict IN ('filled', 'not_filled', 'canceled')
+                WHERE verdict IN ('not_filled', 'canceled')
+                   OR (verdict='filled' AND exit_price IS NOT NULL)
               )
             ORDER BY id
             """,
             (max_data_date,),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def unsettled_execution_count(self, max_data_date: str) -> int:
+        row = self._conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM execution_replay
+            WHERE verdict='filled'
+              AND entry_price > 0
+              AND exit_price IS NULL
+              AND trade_date <= ?
+            """,
+            (max_data_date,),
+        ).fetchone()
+        return int(row["count"] or 0) if row else 0
 
     def upsert_outcome(self, row: dict) -> None:
         self._conn.execute(
@@ -1727,19 +1745,21 @@ class Storage:
         self._conn.commit()
 
     def save_execution_replay(self, row: dict) -> None:
+        settled_at = _now() if row.get("exit_price") is not None else None
         self._conn.execute(
             """
             INSERT INTO execution_replay(
               prediction_id, trade_date, ts_code, verdict, plan_type, high_open_pct,
               vwap_15m, close_15m, entry_price, exit_price, reason, source,
-              created_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+              settled_at, created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(prediction_id) DO UPDATE SET
               verdict=excluded.verdict, plan_type=excluded.plan_type,
               high_open_pct=excluded.high_open_pct,
               vwap_15m=excluded.vwap_15m, close_15m=excluded.close_15m,
               entry_price=excluded.entry_price, exit_price=excluded.exit_price,
               reason=excluded.reason, source=excluded.source,
+              settled_at=excluded.settled_at,
               created_at=excluded.created_at
             """,
             (
@@ -1749,8 +1769,20 @@ class Storage:
                 row.get("high_open_pct"), row.get("vwap_15m"),
                 row.get("close_15m"), row.get("entry_price"),
                 row.get("exit_price"), row.get("reason", ""),
-                row.get("source", ""), _now(),
+                row.get("source", ""), settled_at, _now(),
             ),
+        )
+        self._conn.commit()
+
+    def settle_execution_replay(self, prediction_id: int, exit_price: float) -> None:
+        """盘后仅补齐退出价，保留盘中已确认的入场价格与触发证据。"""
+        self._conn.execute(
+            """
+            UPDATE execution_replay
+            SET exit_price=?, settled_at=?
+            WHERE prediction_id=? AND verdict='filled' AND entry_price>0
+            """,
+            (float(exit_price), _now(), prediction_id),
         )
         self._conn.commit()
 

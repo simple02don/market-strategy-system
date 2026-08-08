@@ -65,6 +65,7 @@ def replay_candidate(
     *,
     pre_close: float,
     prev_low: float,
+    settlement_price: float | None = None,
 ) -> dict[str, Any]:
     prediction_id = int(prediction.get("id") or 0)
     trade_date = str(prediction.get("trade_date") or "")
@@ -101,16 +102,18 @@ def replay_candidate(
             **base,
             "verdict": "no_data",
             "high_open_pct": round(high_open_pct, 4),
-            "exit_price": float(minute_rows[-1].get("close") or 0.0),
             "reason": f"分钟数据不足{min_confirm_minutes}根，无法确认",
         }
-    exit_price = float(minute_rows[-1].get("close") or 0.0)
     cancel_open_gap = float(plan.get("cancel_open_gap_pct", 0.05) or 0.05)
     max_open_gap = float(plan.get("max_open_gap_pct", 0.03) or 0.03)
     common_base = {
         **base,
         "high_open_pct": round(high_open_pct, 4),
-        "exit_price": round(exit_price, 4),
+        "exit_price": (
+            round(float(settlement_price), 4)
+            if settlement_price is not None and float(settlement_price) > 0
+            else None
+        ),
         "source": str(minute_rows[0].get("source", "")),
     }
     if high_open_pct > cancel_open_gap + 1e-9:
@@ -212,6 +215,29 @@ def run_replay(
     for record in records:
         ts_code = str(record.get("entity") or "")
         trade_date = str(record.get("trade_date") or "")
+        settlement = storage._conn.execute(
+            "SELECT close FROM daily_bar WHERE ts_code=? AND trade_date=?",
+            (ts_code, trade_date),
+        ).fetchone()
+        settlement_price = float(settlement["close"] or 0.0) if settlement else None
+        existing = storage._conn.execute(
+            """
+            SELECT verdict, entry_price, exit_price FROM execution_replay
+            WHERE prediction_id=?
+            """,
+            (int(record.get("id") or 0),),
+        ).fetchone()
+        if (
+            existing
+            and str(existing["verdict"]) == "filled"
+            and float(existing["entry_price"] or 0.0) > 0
+            and existing["exit_price"] is None
+            and settlement_price is not None
+            and settlement_price > 0
+        ):
+            storage.settle_execution_replay(int(record["id"]), settlement_price)
+            counts["filled"] += 1
+            continue
         rows = storage.minute_bars(ts_code, trade_date)
         if len(rows) < 30:
             fetched = fetch_minute_bars(ts_code, trade_date, provider=provider)
@@ -233,6 +259,7 @@ def run_replay(
             rows,
             pre_close=pre_close,
             prev_low=prev_low,
+            settlement_price=settlement_price,
         )
         storage.save_execution_replay(result)
         counts[result["verdict"]] = counts.get(result["verdict"], 0) + 1

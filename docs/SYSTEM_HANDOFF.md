@@ -1,6 +1,6 @@
 # A股主力策略情景推演与分层选股系统 · 接手文件
 
-> 最后核验时间：2026-08-07（周五）
+> 最后核验时间：2026-08-08（周六）
 > 详细规则见 [AGENTS.md](../AGENTS.md)，功能分期见 [REPAIR_PHASES.md](REPAIR_PHASES.md)，
 > 定位与用法见 [README.md](../README.md)。本文件只写键名，不写任何 token/密码。
 
@@ -8,8 +8,8 @@
 
 | 项 | 状态 |
 |---|---|
-| 代码 | GitHub PR #1 已合并（业务合并提交 `ff0fa16`）；生产部署提交 `eafdbcf`，业务文件与 GitHub 合并内容一致 |
-| 测试 | 81 个全过（隔离目录与生产目录各一次，Python 3.12）；compileall 通过 |
+| 代码 | `main` 为唯一部署分支；每次发布必须让本地、GitHub 与生产运行同一个确切 commit |
+| 测试 | 当前回归基线 139 个；发布前本地与生产都必须完整通过 |
 | 生产 | `/home/ubuntu/market-strategy-system`（ubuntu 运行，`.env` 600）；`ssh jckx-prod`（root@43.136.54.243，密钥 `~/.ssh/jckx_prod_ed25519`） |
 | 数据 | SQLite `data/market_strategy.sqlite3`，最新行情日 20260807；部署前在线备份位于 `/home/ubuntu/market-strategy-deploy-backups/pre-e22553b/` |
 | 模型 | `models/artifacts/v1`、`v2`（gitignored）；组件未批准 → 线上走规则基线 |
@@ -72,7 +72,7 @@ cd /home/ubuntu/market-strategy-system
     回踩略超窗口”补位（仅无合格时启用）
   - 防守模式：反包猎手（被砸板块未破位+止跌特征）、超跌修复、
     避风港轮动（行业净流入+资金广度+个股 MA20 结构+直接资金方向，≤15%仓位）
-- **硬过滤**：常规/防守池共用 ST、板块、市值、PE、流动性、上市天数、涨停和过热过滤；
+- **硬过滤与风险处理**：常规/防守池共用 ST、板块、市值、流动性、上市天数和过热过滤；PE 无效/亏损及极高 PE 采用扣分，不直接剔除。前一日涨停股进入连续强势执行计划，目标日封死涨停不模拟成交；
   目标板块候选在形态筛选前不被全市场榜单截断
 - **训练/实验**：四段切分、每日截面 RankIC、成本后回测、滚动/逐日稳定性门槛、组件批准、
   原子发布+回退、train_experiment 落库、train-log、市场 walk-forward
@@ -82,6 +82,11 @@ cd /home/ubuntu/market-strategy-system
 - **报告/推送**：主力意图推演、恶意证据、阶段应对手册、防守机会、
   支撑/压力列；明确数据截止日/预测目标日/运行模式，推送成功后才记正式；
   企业微信含预判/防守机会行；公网链接
+- **尾盘复评**：14:50 起读取前夜正式候选、最新热榜和分钟线，合成截至决策时点的
+  当日日线，重新执行统一硬过滤与个股复合评分，再融合夜间评分、热榜位置和尾盘结构
+  完整重排；新增候选执行行业/概念集中度限制，模拟持仓执行止损、转弱和利润保护判断。
+  该链只使用尾盘可观测数据，不伪造收盘后才完整可用的最终日线、`daily_basic`、收盘资金
+  或公告汇总。
 
 ## 5. 生产环境要点
 
@@ -93,8 +98,10 @@ cd /home/ubuntu/market-strategy-system
   `/jckx/` 带 proxy_redirect + sub_filter 修正登录表单）；
   `0.0.0.0:80`（ACME+跳转）；WireGuard `10.66.0.1:80`（JCKX 根路径仅内网）
 - 会话：10 年（`JCKX_SESSION_MAX_AGE=315360000`），SameSite=Lax，Secure（HTTPS）
-- cron（ubuntu）：14:50 tail-review、23:00 nightly、23:08 health、23:15 track-outcomes、
+- cron（ubuntu）：14:50-14:56 每两分钟 tail-review（成功后跳过）、23:00 nightly、23:08 health、23:15 track-outcomes、
   周六 02:00 train、周六 03:00 backtest、auth 看门狗每 5 分钟
+- `setup_cron.sh` 会移除旧 `/home/ubuntu/jckx-tail-overnight` 的 `run.sh` 定时任务，防止旧尾盘
+  推送与新系统并行；不会删除旧目录，也不会误删其中单独保留的报告服务进程。
 - 证书续期：cron `17 */6 * * *` certbot renew + reload nginx；webroot 公网 80
 
 ## 6. 在新电脑继续开发
@@ -104,7 +111,7 @@ git clone git@github.com:simple02don/market-strategy-system.git
 cd market-strategy-system
 python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
 cp .env.example .env   # 真实值从生产抄：ssh jckx-prod 'cat .../.env'
-PYTHONPATH=src ./venv/bin/python -m pytest tests/ -q   # 期望 81 passed
+PYTHONPATH=src ./venv/bin/python -m pytest tests/ -q   # 当前期望 139 passed
 ```
 
 注意：macOS Intel 上 lightgbm 需要 libomp（放 `/usr/local/opt/libomp/lib/libomp.dylib`，
@@ -114,15 +121,20 @@ PYTHONPATH=src ./venv/bin/python -m pytest tests/ -q   # 期望 81 passed
 ## 7. 发布/部署流程
 
 ```bash
-# 本地：测试 → 提交 → 推送
+# 本地：测试 → 提交 → 推送 → 制作确切提交的 bundle
 PYTHONPATH=src ./venv/bin/python -m pytest tests/ -q
 git add -A && git commit -m "..." && git push origin main
-git diff --name-only HEAD~1 | tar -czf /tmp/mss.tar.gz -T -
-scp /tmp/mss.tar.gz jckx-prod:/tmp/
-# 生产：解压 → 测试 → 提交部署 commit
-ssh jckx-prod 'runuser -u ubuntu -- sh -c "cd ... && tar -xzf /tmp/mss.tar.gz \
+git bundle create /tmp/market-strategy-system.bundle main
+scp /tmp/market-strategy-system.bundle jckx-prod:/tmp/
+# 生产：直接对齐 GitHub 已存在的确切 commit，不创建第二个“部署 commit”
+ssh jckx-prod 'runuser -u ubuntu -- bash -lc "cd /home/ubuntu/market-strategy-system \
+  && git fetch /tmp/market-strategy-system.bundle main \
+  && git reset --hard FETCH_HEAD \
+  && ./setup_cron.sh \
   && PYTHONPATH=src ./venv/bin/python -m pytest tests/ -q \
-  && git add -A && git -c user.name=deploy -c user.email=deploy@local commit -m \"deploy: ...\" "'
+  && ./run.sh health"'
+git rev-parse HEAD
+ssh jckx-prod 'cd /home/ubuntu/market-strategy-system && git rev-parse HEAD && git status --porcelain'
 # 若改了 auth_server.py：重启对应服务（见第 5 节）
 ```
 
@@ -131,30 +143,28 @@ ssh jckx-prod 'runuser -u ubuntu -- sh -c "cd ... && tar -xzf /tmp/mss.tar.gz \
 
 ## 8. 已知边界与待办
 
-- **报告页面圈注修改待办**：用户提供了一张带圈注的报告截图要求改版，
-  但当前会话无法读取图片，已请用户用文字描述；拿到意见后严格只改圈注处，
-  未圈处只做色彩/明暗调整（改 `report.py`，生成后用浏览器核对）。
 - 阶段机与三形态阈值目前是启发式；需积累 2-4 周 outcome+回放数据后回标定。
 - 正常模式仍有极小概率 0 主推：目标板块内连 near-miss 都不合格时（设计如此）。
 - 历史 ST/行业 PIT 不完整；行情修订历史未版本化。
 - 资讯增量 A/B（有新闻 vs 无新闻）待 60 个正式交易日数据。
-- JCKX 系统（另一仓库 `jckx-tail-overnight`）白天报告 0 推荐是设计内保守行为；
-  已放宽 `TAIL_AI_WATCH_UPGRADE_MIN_SCORE=60`、`TAIL_OPPORTUNITY_MIN_AI_SCORE=50`，
-  其推送链接已改公网 `/jckx/`。
-- 共享缓存只有指数分钟，无个股分钟；分钟回放依赖 Tushare stk_mins。
+- 尾盘新发现没有前夜 LLM 概率，系统只展示尾盘可验证的统一评分，不伪造模型判断。
+- 尾盘时点无法取得收盘后最终 `daily_basic`、收盘资金与完整公告汇总，因此采用尾盘适配重排，
+  不能把它描述成“收盘后夜间任务原样重跑”。
+- 个股分钟数据依赖已配置的分钟源回退链；Tushare 6000 积分本身不保证实时分钟权限。
 
 ## 9. 建议技能（给接手 Agent）
 
 - `diagnosing-bugs`：运行异常先走诊断循环
-- `tdd`：改代码测试先行（仓库已有 81 个回归测试）
+- `tdd`：改代码测试先行（仓库当前有 139 个回归测试）
 - `self-improvement`：意外失败或纠正时记录教训
 - `handoff`：再次交接时重新生成本文件
 
 ## 10. 近期提交（改动依据）
 
+以 `git log --oneline` 为准；生产不得再生成哈希不同的部署提交。主要历史依据：
+
 `507cfb4` 统一硬过滤/收益与分钟回放正确性；`e22553b` 防守资金广度、结构资格、
-机器可读执行计划与报告目标日语义；GitHub PR #1 合并提交 `ff0fa16`；生产部署提交
-`eafdbcf`。其余历史依据：
+机器可读执行计划与报告目标日语义；GitHub PR #1 合并提交 `ff0fa16`。其余历史依据：
 
 `9edb19c` 防守候选形态保留；`e8f1810` 支撑压力+near-miss；`c11dcac`/`389b2dc`/
 `5155f13`/`55b8f47`/`17ea830`/`86b2a0f` 防守机会与避风港；`a7c4cae`/`60f4f34`/

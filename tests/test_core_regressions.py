@@ -247,6 +247,26 @@ def test_dedup_skips_only_when_existing_report_is_as_fresh():
     assert _existing_report_is_fresh(None, "20260806") is True
 
 
+def test_dedup_refreshes_when_information_cutoff_is_old(monkeypatch):
+    monkeypatch.setenv("FORMAL_REPORT_MAX_INFO_AGE_HOURS", "12")
+    payload = json.dumps(
+        {
+            "dataset_version": "live_20260807_20260808200000",
+            "information_cutoff": "2026-08-08 19:00:00",
+        }
+    )
+    assert _existing_report_is_fresh(
+        payload,
+        "20260807",
+        current_time=datetime(2026, 8, 9, 23, 0),
+    ) is False
+    assert _existing_report_is_fresh(
+        payload,
+        "20260807",
+        current_time=datetime(2026, 8, 8, 23, 0),
+    ) is True
+
+
 def test_primary_picks_are_industry_diversified(monkeypatch):
     monkeypatch.setenv("PRIMARY_RULE_MIN_SCORE", "0")
     dates = [f"2026080{i}" for i in range(1, 6)]

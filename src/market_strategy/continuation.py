@@ -43,6 +43,7 @@ def select_fresh_recommendations(
     *,
     active_codes: set[str] | None = None,
     limit: int = 5,
+    defensive_mode: bool = False,
 ) -> list[dict[str, Any]]:
     """从已完成硬过滤的热榜候选中选出至多五支新推荐。"""
     active_codes = active_codes or set()
@@ -50,7 +51,26 @@ def select_fresh_recommendations(
     min_probability = config.env_float("FRESH_MIN_PROBABILITY", 0.52)
     min_factor_coverage = config.env_float("MIN_PREMIUM_FACTOR_COVERAGE", 0.60)
     max_one_day_risk = config.env_float("MAX_ONE_DAY_RISK", 0.65)
+    max_same_industry = config.env_int("FINAL_MAX_SAME_INDUSTRY", 2)
+    require_probability = False
+    if defensive_mode:
+        min_score = max(min_score, config.env_float("DEFENSIVE_FRESH_MIN_SCORE", 66.0))
+        min_probability = max(
+            min_probability,
+            config.env_float("DEFENSIVE_FRESH_MIN_PROBABILITY", 0.60),
+        )
+        max_one_day_risk = min(
+            max_one_day_risk,
+            config.env_float("DEFENSIVE_MAX_ONE_DAY_RISK", 0.40),
+        )
+        max_same_industry = min(
+            max_same_industry,
+            config.env_int("DEFENSIVE_MAX_SAME_INDUSTRY", 1),
+        )
+        limit = min(limit, config.env_int("DEFENSIVE_FRESH_MAX", 3))
+        require_probability = bool(config.env_int("DEFENSIVE_REQUIRE_PROBABILITY", 1))
     selected: list[dict[str, Any]] = []
+    industry_counts: dict[str, int] = {}
     for candidate in sorted(candidates, key=lambda item: float(item.get("score", 0)), reverse=True):
         ts_code = str(candidate.get("ts_code") or "")
         if not ts_code or ts_code in active_codes:
@@ -67,6 +87,8 @@ def select_fresh_recommendations(
             if model_probability is not None and intent_probability is not None
             else intent_probability if intent_probability is not None else model_probability
         )
+        if require_probability and probability is None:
+            continue
         if probability is not None and float(probability or 0.0) < min_probability:
             continue
         premium = candidate.get("premium_features")
@@ -95,12 +117,17 @@ def select_fresh_recommendations(
         history = _history_for(bars, ts_code, trade_date)
         if history.empty:
             continue
+        industry = str(candidate.get("industry") or "")
+        if industry and industry_counts.get(industry, 0) >= max_same_industry:
+            continue
         reference_close = float(history["close"].iloc[-1])
         item = dict(candidate)
         item.update(
             {
                 "tier": "primary",
-                "selection_type": "fresh_hot100",
+                "selection_type": (
+                    "fresh_hot100_defensive" if defensive_mode else "fresh_hot100"
+                ),
                 "forecast_direction": "rise",
                 "reference_close": round(reference_close, 2),
                 "stop_loss_price": _stop_price(history),
@@ -114,6 +141,8 @@ def select_fresh_recommendations(
                     "minimum_factor_coverage": min_factor_coverage,
                     "one_day_risk": round(one_day_risk, 4),
                     "maximum_one_day_risk": max_one_day_risk,
+                    "defensive_mode": defensive_mode,
+                    "maximum_same_industry": max_same_industry,
                 },
             }
         )
@@ -145,6 +174,8 @@ def select_fresh_recommendations(
                 "早盘拉升过快或冲高回落不追；高开>5%、封死涨停或低开破前日低点放弃"
             )
         selected.append(item)
+        if industry:
+            industry_counts[industry] = industry_counts.get(industry, 0) + 1
         if len(selected) >= limit:
             break
     return selected

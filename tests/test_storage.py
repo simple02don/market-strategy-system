@@ -42,6 +42,30 @@ def test_existing_replay_table_migrates_plan_type_column(tmp_path):
         row[1] for row in storage._conn.execute("PRAGMA table_info(execution_replay)")
     }
     assert "plan_type" in columns
+    assert "settled_at" in columns
+    storage.close()
+
+
+def test_unsettled_execution_count_only_counts_filled_without_exit(tmp_path):
+    storage = Storage(tmp_path / "unsettled.db")
+    rows = [
+        (1, "20260806", "600001.SH", "filled", 10.0, None),
+        (2, "20260806", "600002.SH", "filled", 10.0, 10.5),
+        (3, "20260806", "600003.SH", "not_filled", None, None),
+        (4, "20260807", "600004.SH", "filled", 10.0, None),
+    ]
+    storage._conn.executemany(
+        """
+        INSERT INTO execution_replay(
+          prediction_id,trade_date,ts_code,verdict,entry_price,exit_price,created_at
+        ) VALUES(?,?,?,?,?,?,CURRENT_TIMESTAMP)
+        """,
+        rows,
+    )
+    storage._conn.commit()
+
+    assert storage.unsettled_execution_count("20260806") == 1
+    assert storage.unsettled_execution_count("20260807") == 2
     storage.close()
 
 

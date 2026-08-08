@@ -112,6 +112,11 @@ def test_intraday_monitor_activates_and_pushes_once(tmp_path):
     assert row["status"] == "active"
     assert row["entry_price"] == 10.2
     assert row["entry_alerted_at"]
+    replay = storage._conn.execute(
+        "SELECT entry_price, exit_price FROM execution_replay"
+    ).fetchone()
+    assert replay["entry_price"] == 10.2
+    assert replay["exit_price"] is None
     storage.close()
 
 
