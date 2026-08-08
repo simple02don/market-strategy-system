@@ -166,7 +166,14 @@ def cmd_health(args) -> int:
             "fact_rows": storage._conn.execute("SELECT COUNT(*) FROM atomic_fact").fetchone()[0],
             "last_date": storage._conn.execute("SELECT MAX(trade_date) FROM daily_bar").fetchone()[0],
         }
-        report_files = sorted(config.REPORT_DIR.glob("market_strategy_*.html")) if config.REPORT_DIR.exists() else []
+        report_files = (
+            sorted(
+                config.REPORT_DIR.glob("market_strategy_*.html"),
+                key=lambda item: item.stat().st_mtime,
+            )
+            if config.REPORT_DIR.exists()
+            else []
+        )
         latest_tail = storage.latest_run("tail-review", str(counts["last_date"] or ""))
         provider = TushareProvider()
         calendar = TradingCalendar(storage, provider)
