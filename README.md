@@ -51,6 +51,7 @@ cp .env.example .env   # 填入 Tushare token、企业微信 webhook、AI key
 ./run.sh data-update             # 增量更新当日数据
 ./run.sh nightly --no-push       # 生成今晚报告但不推送（自检）
 ./run.sh nightly                 # 正式夜间运行并推送
+./run.sh tail-review --no-push   # 14:50 尾盘热门股与模拟持仓复评（不推送）
 ./run.sh train                   # 模型训练（低峰时段，全自动）
 ./run.sh health                  # 健康检查
 ```
@@ -58,6 +59,7 @@ cp .env.example .env   # 填入 Tushare token、企业微信 webhook、AI key
 ## 调度（独立 cron）
 
 - 每天 23:00：`nightly`（明天不是交易日则静默退出）
+- 交易日 14:50：`tail-review`（最新热榜/分钟线复评尾盘机会和模拟持仓）
 - 每天 23:08：`health`（核验夜间运行、资讯证据状态与推送）
 - 每周六 02:00：`train`（模型重训，不阻塞 23:00 推理）
 - 报告服务：`@reboot` + 每 5 分钟 watchdog，监听 `127.0.0.1:8082`，nginx
@@ -81,12 +83,14 @@ src/market_strategy/
 本系统只生成研究与概率推演，不自动下单，不构成投资建议。
 # 盘中入场提醒
 
-正式夜间推荐先进入 `pending_entry`。交易日 09:45 后，`monitor-entry` 会读取前 15 根分钟线，复用报告中的冻结执行计划确认是否入场；满足条件后立即激活跟踪、按实际确认价重算止损，并通过企业微信只推送一次。推送失败会在下一轮自动重试。
+正式夜间推荐先进入 `pending_entry`。交易日 09:35 后，`monitor-entry` 会按冻结执行计划持续检查到默认 10:15：普通候选最早确认 15 分钟，前一日涨停但仍有正常成交机会的候选最早确认 5 分钟；涨停价不会假设为可成交。满足条件后立即激活跟踪、按实际确认价重算止损，并通过企业微信只推送一次。推送失败会在下一轮自动重试。
 
 ```bash
 ./run.sh monitor-entry
 ```
 
 `setup_cron.sh` 默认在交易时段每分钟执行一次。Tushare 6000 积分不自动包含实时分钟行情；系统默认使用已有分钟源回退链，另购 Tushare 实时行情权限后可设置 `ENABLE_TUSHARE_REALTIME_MINUTE=1`。
+
+`tail-review` 不读取真实账户，只管理系统模拟持仓。它优先复评前夜正式候选，同时允许热榜前列中满足市值、流动性和尾盘结构要求的新热门股进入低置信度发现通道；对模拟持仓输出继续持有、减仓、退出或 T+1 锁定次日退出。尾盘新入场会直接记为系统模拟成交。
 
 集合竞价权限通过 `ENABLE_TUSHARE_OPEN_AUCTION=1` 开启，并严格按信息时点拆分：`stk_auction_o` 提供历史开盘竞价，`stk_auction_c` 提供历史收盘竞价，两者用于夜间评分和回测；`stk_auction` 在目标交易日盘中读取，用于入场确认留痕，不会提前写入前一晚预测。

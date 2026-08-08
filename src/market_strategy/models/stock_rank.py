@@ -25,7 +25,7 @@ def hard_eligible_stocks(
     premium_features: dict[str, dict[str, Any]] | None = None,
 ) -> pd.DataFrame:
     """返回通过统一硬过滤的股票池，供常规与防守路线共同使用。"""
-    min_circ_mv = config.env_float("MIN_CIRC_MV", 110)
+    min_circ_mv = config.env_float("MIN_CIRC_MV", 50)
     min_list_days = config.env_int("MIN_LIST_DAYS", 60)
     min_amount = config.env_float("MIN_AMOUNT_20D", 1.5e8)
     premium_features = premium_features or {}
@@ -104,6 +104,22 @@ def hard_eligible_stocks(
     )
     limit_up = np.where(merged["symbol"].str.startswith("30"), 19.8, 9.8)
     merged["limit_up_break"] = merged["pct_chg"] >= limit_up - 0.2
+    merged["valuation_risk"] = np.select(
+        [
+            ~np.isfinite(merged["pe_ttm"]) | (merged["pe_ttm"] <= 0),
+            merged["pe_ttm"] >= 300,
+        ],
+        ["亏损或PE无效", "PE(TTM)≥300"],
+        default="",
+    )
+    merged["valuation_penalty"] = np.select(
+        [
+            ~np.isfinite(merged["pe_ttm"]) | (merged["pe_ttm"] <= 0),
+            merged["pe_ttm"] >= 300,
+        ],
+        [8.0, 5.0],
+        default=0.0,
+    )
 
     def hard_block(row) -> str:
         if row["premium_risk_veto"]:
@@ -115,14 +131,10 @@ def hard_eligible_stocks(
             return "6000积分个股因子覆盖不足"
         if not np.isfinite(row["circ_mv"]) or row["circ_mv"] < min_circ_mv:
             return "流通市值不足"
-        if not np.isfinite(row["pe_ttm"]) or not (0 < row["pe_ttm"] < 300):
-            return "PE(TTM)不在0-300"
         if not np.isfinite(row["amount_20d"]) or row["amount_20d"] < min_amount:
             return "20日均额不足"
         if row["list_days"] < min_list_days:
             return "上市时间不足"
-        if row["limit_up_break"]:
-            return "当日接近涨停"
         if np.isfinite(row["ret_5d"]) and row["ret_5d"] > 0.35:
             return "5日涨幅过热"
         return ""
@@ -186,10 +198,12 @@ def rank_stocks(
     ).round(1)
     if premium_features:
         passed["score"] = (
-            passed["base_score"] * 0.55 + passed["premium_score"] * 0.45
+            passed["base_score"] * 0.55
+            + passed["premium_score"] * 0.45
+            - passed["valuation_penalty"]
         ).round(1)
     else:
-        passed["score"] = passed["base_score"]
+        passed["score"] = (passed["base_score"] - passed["valuation_penalty"]).round(1)
     passed = passed.sort_values("score", ascending=False)
 
     out = []
@@ -224,6 +238,18 @@ def rank_stocks(
             watch_count += 1
         else:
             tier = "risk_control"
+        limit_continuation = bool(row["limit_up_break"])
+        execution_plan = {
+            "version": 2,
+            "type": "limit_continuation" if limit_continuation else "standard_vwap15",
+            "min_confirm_minutes": 5 if limit_continuation else 15,
+            "latest_confirm_time": "10:15",
+            "max_open_gap_pct": 0.05 if limit_continuation else 0.03,
+            "cancel_open_gap_pct": 0.08 if limit_continuation else 0.05,
+            "cancel_below_prev_low": True,
+            "require_close15_above_vwap": True,
+            "reject_locked_limit_up": True,
+        }
         out.append(
             {
                 "ts_code": row["ts_code"],
@@ -234,7 +260,12 @@ def rank_stocks(
                 "ret_5d": round(float(row["ret_5d"]), 3) if row["ret_5d"] is not None else None,
                 "ret_20d": round(float(row["ret_20d"]), 3) if row["ret_20d"] is not None else None,
                 "circ_mv": round(float(row["circ_mv"]), 1),
-                "pe_ttm": round(float(row["pe_ttm"]), 2) if row["pe_ttm"] is not None else None,
+                "pe_ttm": (
+                    round(float(row["pe_ttm"]), 2)
+                    if np.isfinite(row["pe_ttm"])
+                    else None
+                ),
+                "valuation_risk": str(row["valuation_risk"] or ""),
                 "turnover_rate": round(float(row["turnover_rate"]), 2) if row["turnover_rate"] is not None else None,
                 "amount_20d_yi": round(float(row["amount_20d"]) / 1e8, 2) if row["amount_20d"] is not None else None,
                 "evidence_score": round(float(row["evidence_score"]), 4),
@@ -242,16 +273,18 @@ def rank_stocks(
                 "premium_features": premium_features.get(str(row["ts_code"]), {}),
                 "role": _stock_role(row),
                 "tier": tier,
-                "confirm_conditions": "高开≤3%且开盘15分钟站稳分时均线",
-                "cancel_conditions": "高开>5%放弃；低开破前日低点放弃",
-                "execution_plan": {
-                    "version": 1,
-                    "type": "standard_vwap15",
-                    "max_open_gap_pct": 0.03,
-                    "cancel_open_gap_pct": 0.05,
-                    "cancel_below_prev_low": True,
-                    "require_close15_above_vwap": True,
-                },
+                "limit_continuation": limit_continuation,
+                "confirm_conditions": (
+                    "换手涨停延续：开盘5分钟后站稳VWAP且未封死涨停"
+                    if limit_continuation
+                    else "高开≤3%且开盘15分钟后站稳分时均线"
+                ),
+                "cancel_conditions": (
+                    "高开>8%放弃；封死涨停不可成交；低开破前日低点放弃"
+                    if limit_continuation
+                    else "高开>5%放弃；封死涨停不可成交；低开破前日低点放弃"
+                ),
+                "execution_plan": execution_plan,
             }
         )
     return out

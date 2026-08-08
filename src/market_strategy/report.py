@@ -45,6 +45,8 @@ def _candidate_row(c: dict[str, Any], route_names: dict[str, str]) -> str:
             f"技{_esc(premium.get('technical_score', '—'))}",
         ]
     )
+    if c.get("valuation_risk"):
+        factor_summary += f"<br>估值提示：{_esc(c.get('valuation_risk'))}"
     confidence = (
         f"上涨概率 {_pct(c.get('selection_probability', c.get('prob_positive')))}｜"
         f"因子覆盖 {_pct(premium.get('factor_coverage'))}"

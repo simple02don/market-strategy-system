@@ -27,10 +27,13 @@ def _execution_plan(prediction: dict[str, Any]) -> dict[str, Any]:
     base = {
         "version": 0,
         "type": "standard_vwap15",
+        "min_confirm_minutes": 15,
+        "latest_confirm_time": "10:15",
         "max_open_gap_pct": 0.03,
         "cancel_open_gap_pct": 0.05,
         "cancel_below_prev_low": True,
         "require_close15_above_vwap": True,
+        "reject_locked_limit_up": True,
     }
     tier = str(payload.get("tier") or "")
     if tier == "rebound":
@@ -79,6 +82,7 @@ def replay_candidate(
         "source": "",
         "reason": "",
         "plan_type": plan_type,
+        "confirm_minutes": None,
     }
     if plan_type == "observe_only":
         return {**base, "verdict": "canceled", "reason": "观察/回避层级不执行"}
@@ -87,68 +91,98 @@ def replay_candidate(
 
     open_price = float(minute_rows[0].get("open") or minute_rows[0].get("close") or 0.0)
     high_open_pct = open_price / pre_close - 1.0 if pre_close else 0.0
-    window = minute_rows[:15]
-    if len(window) < 15:
+    min_confirm_minutes = max(1, int(plan.get("min_confirm_minutes", 15) or 15))
+    latest_confirm_time = str(plan.get("latest_confirm_time") or "10:15")
+    eligible_rows = [
+        row
+        for row in minute_rows
+        if str(row.get("trade_time") or "")[11:16] <= latest_confirm_time
+    ]
+    if not eligible_rows:
+        eligible_rows = minute_rows
+    if len(eligible_rows) < min_confirm_minutes:
         return {
             **base,
             "verdict": "no_data",
             "high_open_pct": round(high_open_pct, 4),
             "exit_price": float(minute_rows[-1].get("close") or 0.0),
-            "reason": "分钟数据不足15根，无法确认",
+            "reason": f"分钟数据不足{min_confirm_minutes}根，无法确认",
         }
-    total_amount = sum(float(row.get("amount") or 0.0) for row in window)
-    total_vol = sum(float(row.get("vol") or 0.0) for row in window)
-    vwap = (
-        total_amount / (total_vol * 100.0)
-        if total_vol > 0
-        else sum(float(row.get("close") or 0.0) for row in window) / len(window)
-    )
-    close_15 = float(window[-1].get("close") or 0.0)
-    high_15 = max(float(row.get("high") or row.get("close") or 0.0) for row in window)
-    low_15 = min(float(row.get("low") or row.get("close") or 0.0) for row in window)
-    range_15 = high_15 - low_15
-    lower_shadow_ratio = (
-        (min(open_price, close_15) - low_15) / range_15 if range_15 > 0 else 0.0
-    )
     exit_price = float(minute_rows[-1].get("close") or 0.0)
-    common = {
+    cancel_open_gap = float(plan.get("cancel_open_gap_pct", 0.05) or 0.05)
+    max_open_gap = float(plan.get("max_open_gap_pct", 0.03) or 0.03)
+    common_base = {
         **base,
         "high_open_pct": round(high_open_pct, 4),
-        "vwap_15m": round(vwap, 4),
-        "close_15m": round(close_15, 4),
-        "low_15m": round(low_15, 4),
-        "lower_shadow_ratio_15m": round(lower_shadow_ratio, 4),
         "exit_price": round(exit_price, 4),
         "source": str(minute_rows[0].get("source", "")),
     }
-    cancel_open_gap = float(plan.get("cancel_open_gap_pct", 0.05) or 0.05)
-    max_open_gap = float(plan.get("max_open_gap_pct", 0.03) or 0.03)
-    if high_open_pct > cancel_open_gap:
-        return {**common, "verdict": "canceled", "reason": "高开>5%放弃"}
+    if high_open_pct > cancel_open_gap + 1e-9:
+        return {**common_base, "verdict": "canceled", "reason": "高开超过取消阈值"}
     if plan.get("cancel_below_prev_low", True) and high_open_pct < 0 and open_price < prev_low:
-        return {**common, "verdict": "canceled", "reason": "低开破前日低点放弃"}
-    if high_open_pct > max_open_gap:
-        return {**common, "verdict": "not_filled", "reason": "高开3%-5%未达确认条件"}
+        return {**common_base, "verdict": "canceled", "reason": "低开破前日低点放弃"}
+    if high_open_pct > max_open_gap + 1e-9:
+        return {**common_base, "verdict": "not_filled", "reason": "高开超过允许入场阈值"}
     min_price = plan.get("min_price")
     if plan_type == "haven_vwap15_ma20":
         if min_price is None or float(min_price) <= 0:
-            return {**common, "verdict": "canceled", "reason": "避风港计划缺少MA20基准"}
-        if low_15 < float(min_price):
-            return {**common, "verdict": "not_filled", "reason": "前15分钟跌破前日MA20"}
-    if plan.get("require_close15_above_open") and close_15 <= open_price:
-        return {**common, "verdict": "not_filled", "reason": "前15分钟未形成反包阳线"}
-    min_lower_shadow = float(plan.get("min_lower_shadow_ratio", 0.0) or 0.0)
-    if lower_shadow_ratio < min_lower_shadow:
-        return {**common, "verdict": "not_filled", "reason": "前15分钟下影承接不足"}
-    if plan.get("require_close15_above_vwap", True) and close_15 < vwap:
-        return {**common, "verdict": "not_filled", "reason": "开盘15分钟未站稳分时均线"}
-    return {
-        **common,
-        "verdict": "filled",
-        # 确认发生在第15根分钟线收盘后，成交价不能回看成开盘价。
-        "entry_price": round(close_15, 4),
-        "reason": f"{plan_type}全部确认条件满足",
-    }
+            return {**common_base, "verdict": "canceled", "reason": "避风港计划缺少MA20基准"}
+
+    symbol = ts_code.split(".", 1)[0]
+    limit_rate = 0.20 if symbol.startswith(("30", "68")) else 0.10
+    upper_limit_price = round(pre_close * (1.0 + limit_rate), 2)
+    last_common = common_base
+    last_reason = "尚未满足确认条件"
+    for confirm_minutes in range(min_confirm_minutes, len(eligible_rows) + 1):
+        window = eligible_rows[:confirm_minutes]
+        total_amount = sum(float(row.get("amount") or 0.0) for row in window)
+        total_vol = sum(float(row.get("vol") or 0.0) for row in window)
+        vwap = (
+            total_amount / (total_vol * 100.0)
+            if total_vol > 0
+            else sum(float(row.get("close") or 0.0) for row in window) / len(window)
+        )
+        close_price = float(window[-1].get("close") or 0.0)
+        high_price = max(float(row.get("high") or row.get("close") or 0.0) for row in window)
+        low_price = min(float(row.get("low") or row.get("close") or 0.0) for row in window)
+        price_range = high_price - low_price
+        lower_shadow_ratio = (
+            (min(open_price, close_price) - low_price) / price_range
+            if price_range > 0
+            else 0.0
+        )
+        common = {
+            **common_base,
+            "vwap_15m": round(vwap, 4),
+            "close_15m": round(close_price, 4),
+            "low_15m": round(low_price, 4),
+            "lower_shadow_ratio_15m": round(lower_shadow_ratio, 4),
+            "confirm_minutes": confirm_minutes,
+        }
+        last_common = common
+        if plan_type == "haven_vwap15_ma20" and low_price < float(min_price):
+            last_reason = "确认窗口跌破前日MA20"
+            continue
+        if plan.get("require_close15_above_open") and close_price <= open_price:
+            last_reason = "确认窗口未形成反包阳线"
+            continue
+        min_lower_shadow = float(plan.get("min_lower_shadow_ratio", 0.0) or 0.0)
+        if lower_shadow_ratio < min_lower_shadow:
+            last_reason = "确认窗口下影承接不足"
+            continue
+        if plan.get("require_close15_above_vwap", True) and close_price < vwap:
+            last_reason = "确认窗口未站稳分时均线"
+            continue
+        if plan.get("reject_locked_limit_up", True) and close_price >= upper_limit_price - 0.005:
+            last_reason = "确认价位于涨停价，无法按普通成交假设入场"
+            continue
+        return {
+            **common,
+            "verdict": "filled",
+            "entry_price": round(close_price, 4),
+            "reason": f"{plan_type}在第{confirm_minutes}分钟满足全部确认条件",
+        }
+    return {**last_common, "verdict": "not_filled", "reason": last_reason}
 
 
 def run_replay(

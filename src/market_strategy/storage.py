@@ -1109,6 +1109,36 @@ class Storage:
         self._conn.commit()
         return tracking_id
 
+    def open_confirmed_tracking_position(
+        self,
+        *,
+        origin_prediction_id: int,
+        ts_code: str,
+        opened_for_trade_date: str,
+        entry_price: float,
+        stop_price: float,
+    ) -> int:
+        """记录已经在盘中确认成交的模拟持仓。"""
+        tracking_id = self.open_tracking_position(
+            origin_prediction_id=origin_prediction_id,
+            ts_code=ts_code,
+            opened_for_trade_date=opened_for_trade_date,
+            reference_price=entry_price,
+            stop_price=stop_price,
+        )
+        now = _now()
+        self._conn.execute(
+            """
+            UPDATE tracking_position
+            SET entry_price=?, entry_trade_date=?, activated_at=?, peak_close=?,
+                updated_at=?
+            WHERE id=?
+            """,
+            (entry_price, opened_for_trade_date, now, entry_price, now, tracking_id),
+        )
+        self._conn.commit()
+        return tracking_id
+
     def resolve_pending_tracking_entries(self, through_date: str) -> dict[str, int]:
         """根据分钟回放把待入场推荐激活或关闭。"""
         rows = self._conn.execute(

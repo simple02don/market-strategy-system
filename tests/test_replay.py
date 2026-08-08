@@ -89,6 +89,60 @@ def test_replay_not_filled_when_below_vwap():
     assert "均线" in result["reason"]
 
 
+def test_replay_can_confirm_after_first_fifteen_minutes():
+    closes = [10.0] * 14 + [9.7] + [10.3] * 5
+    result = replay_candidate(
+        _prediction(entity="600001.SH"),
+        _minutes(10.0, closes),
+        pre_close=10.0,
+        prev_low=9.5,
+    )
+    assert result["verdict"] == "filled"
+    assert result["entry_price"] == 10.3
+    assert result["confirm_minutes"] == 16
+
+
+def test_limit_continuation_can_confirm_after_five_minutes():
+    plan = {
+        "version": 2,
+        "type": "limit_continuation",
+        "min_confirm_minutes": 5,
+        "max_open_gap_pct": 0.05,
+        "cancel_open_gap_pct": 0.08,
+        "require_close15_above_vwap": True,
+        "reject_locked_limit_up": True,
+    }
+    result = replay_candidate(
+        _prediction(entity="600001.SH", execution_plan=plan),
+        _minutes(10.3, [10.3, 10.35, 10.4, 10.45, 10.5]),
+        pre_close=10.0,
+        prev_low=9.5,
+    )
+    assert result["verdict"] == "filled"
+    assert result["confirm_minutes"] == 5
+
+
+def test_limit_continuation_does_not_fake_fill_at_locked_limit():
+    plan = {
+        "version": 2,
+        "type": "limit_continuation",
+        "min_confirm_minutes": 5,
+        "max_open_gap_pct": 0.05,
+        "cancel_open_gap_pct": 0.08,
+        "require_close15_above_vwap": True,
+        "reject_locked_limit_up": True,
+    }
+    result = replay_candidate(
+        _prediction(entity="600001.SH", execution_plan=plan),
+        _minutes(10.5, [11.0] * 8),
+        pre_close=10.0,
+        prev_low=9.5,
+    )
+    assert result["verdict"] == "not_filled"
+    assert result["entry_price"] is None
+    assert "涨停价" in result["reason"]
+
+
 def test_replay_no_data_and_insufficient_rows():
     empty = replay_candidate(_prediction(), [], pre_close=22.0, prev_low=21.5)
     assert empty["verdict"] == "no_data"

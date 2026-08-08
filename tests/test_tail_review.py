@@ -1,0 +1,185 @@
+from datetime import datetime, timedelta
+
+from market_strategy.storage import Storage
+from market_strategy.tail_review import run_tail_review
+
+
+class FakePusher:
+    def __init__(self):
+        self.messages = []
+
+    def send_markdown(self, content):
+        self.messages.append(content)
+        return {"ok": True}
+
+
+def _hot_items(primary_code="600001.SH", primary_price=10.5, primary_pct=5.0):
+    items = []
+    for rank in range(1, 101):
+        code = primary_code if rank == 1 else f"{600100 + rank:06d}.SH"
+        items.append(
+            {
+                "ts_code": code,
+                "ts_name": "测试股份" if rank == 1 else f"填充{rank}",
+                "rank": rank,
+                "pct_change": primary_pct if rank == 1 else 0.0,
+                "current_price": primary_price if rank == 1 else 10.0,
+                "concept": [],
+                "rank_reason": "测试热榜",
+                "hot": 1000 - rank,
+            }
+        )
+    return {
+        "rank_time": "2026-08-06 14:49:00",
+        "source": "fixture",
+        "items": items,
+    }
+
+
+def _minutes(code="600001.SH", closes=None):
+    closes = closes or [10.0 + index * 0.003 for index in range(200)]
+    start = datetime(2026, 8, 6, 9, 31)
+    rows = []
+    for index, close in enumerate(closes):
+        stamp = start + timedelta(minutes=index)
+        rows.append(
+            {
+                "ts_code": code,
+                "trade_date": "20260806",
+                "trade_time": stamp.strftime("%Y-%m-%d %H:%M:%S"),
+                "open": closes[0],
+                "high": max(closes[0], close),
+                "low": min(closes[0], close),
+                "close": close,
+                "vol": 1000.0,
+                "amount": close * 1000 * 100,
+                "source": "fixture",
+            }
+        )
+    return rows
+
+
+def _seed_stock(storage, code="600001.SH", name="测试股份"):
+    storage._conn.execute(
+        """
+        INSERT INTO stock_basic(ts_code,symbol,name,list_date,list_status,is_open,ingest_time)
+        VALUES(?,?,?,'20200101','L',1,'2026-08-05 20:00:00')
+        """,
+        (code, code.split(".")[0], name),
+    )
+    storage._conn.execute(
+        """
+        INSERT INTO daily_bar(
+          ts_code,trade_date,open,high,low,close,pre_close,pct_chg,vol,amount,
+          available_from,ingest_time,dataset_version)
+        VALUES(?, '20260805', 9.8, 10.1, 9.7, 10.0, 9.8, 2.04, 1000, 500000,
+               '2026-08-05 18:00:00','2026-08-05 18:00:00','fixture')
+        """,
+        (code,),
+    )
+    storage._conn.execute(
+        """
+        INSERT INTO daily_basic(
+          ts_code,trade_date,close,turnover_rate,pe_ttm,circ_mv,
+          available_from,ingest_time,dataset_version)
+        VALUES(?, '20260805', 10.0, 5.0, 30.0, 800000,
+               '2026-08-05 18:00:00','2026-08-05 18:00:00','fixture')
+        """,
+        (code,),
+    )
+    storage._conn.commit()
+
+
+def _formal_candidate(storage, code="600001.SH"):
+    run_id = storage.start_run("nightly", "20260806")
+    return storage.save_prediction(
+        run_id=run_id,
+        trade_date="20260806",
+        decision_time="2026-08-05 23:00:00",
+        information_cutoff="2026-08-05 23:00:00",
+        dataset_version="fixture",
+        model_version="rule_v1",
+        category="candidate",
+        entity=code,
+        payload={
+            "name": "测试股份",
+            "score": 82,
+            "probability": 0.66,
+            "reference_close": 10.0,
+            "stop_loss_price": 9.4,
+            "selection_type": "fresh_hot100",
+        },
+        is_formal=True,
+    )
+
+
+def test_tail_review_opens_strong_hot_candidate(tmp_path):
+    storage = Storage(tmp_path / "tail-entry.db")
+    _seed_stock(storage)
+    _formal_candidate(storage)
+    pusher = FakePusher()
+
+    result = run_tail_review(
+        storage,
+        now=datetime(2026, 8, 6, 14, 50),
+        pusher=pusher,
+        minute_fetcher=lambda code, _day: _minutes(code),
+        hot_snapshot_fetcher=lambda _day: _hot_items(),
+    )
+
+    assert result["status"] == "ok"
+    assert [item["ts_code"] for item in result["entries"]] == ["600001.SH"]
+    row = storage._conn.execute(
+        "SELECT status, entry_price, entry_trade_date FROM tracking_position"
+    ).fetchone()
+    assert row["status"] == "active"
+    assert row["entry_price"] > 10.0
+    assert row["entry_trade_date"] == "20260806"
+    assert len(pusher.messages) == 1
+    storage.close()
+
+
+def test_tail_review_closes_old_simulated_position_on_strong_exit(tmp_path):
+    storage = Storage(tmp_path / "tail-exit.db")
+    _seed_stock(storage)
+    prediction_id = _formal_candidate(storage)
+    storage.open_confirmed_tracking_position(
+        origin_prediction_id=prediction_id,
+        ts_code="600001.SH",
+        opened_for_trade_date="20260805",
+        entry_price=10.0,
+        stop_price=9.4,
+    )
+    closes = [10.5] * 150 + [10.4 - index * 0.04 for index in range(50)]
+
+    result = run_tail_review(
+        storage,
+        now=datetime(2026, 8, 6, 14, 50),
+        push=False,
+        minute_fetcher=lambda code, _day: _minutes(code, closes),
+        hot_snapshot_fetcher=lambda _day: _hot_items(primary_price=closes[-1], primary_pct=-5.0),
+    )
+
+    assert result["positions"][0]["action"] == "exit"
+    row = storage._conn.execute("SELECT status, close_reason FROM tracking_position").fetchone()
+    assert row["status"] == "closed"
+    assert row["close_reason"] == "tail_review_exit"
+    storage.close()
+
+
+def test_tail_review_rejects_locked_limit_price(tmp_path):
+    storage = Storage(tmp_path / "tail-limit.db")
+    _seed_stock(storage)
+    _formal_candidate(storage)
+
+    result = run_tail_review(
+        storage,
+        now=datetime(2026, 8, 6, 14, 50),
+        push=False,
+        minute_fetcher=lambda code, _day: _minutes(code, [11.0] * 200),
+        hot_snapshot_fetcher=lambda _day: _hot_items(primary_price=11.0, primary_pct=10.0),
+    )
+
+    assert result["entries"] == []
+    assert storage.active_tracking_positions() == []
+    storage.close()

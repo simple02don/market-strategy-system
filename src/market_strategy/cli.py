@@ -18,6 +18,7 @@ from .pipeline import NightlyPipeline
 from .providers.tushare_provider import TushareProvider
 from .push.wecom import WeComPusher
 from .storage import Storage
+from .tail_review import run_tail_review
 from .timeutil import now_cst
 
 
@@ -242,6 +243,24 @@ def cmd_monitor_entry(args) -> int:
     return 0
 
 
+def cmd_tail_review(args) -> int:
+    with Storage() as storage:
+        provider = TushareProvider()
+        calendar = TradingCalendar(storage, provider)
+        today = now_cst().date()
+        if not calendar.is_trading_day(today):
+            print(json.dumps({"status": "skip", "reason": "not_trading_day"}, ensure_ascii=False))
+            return 0
+        result = run_tail_review(
+            storage,
+            provider=provider,
+            push=not args.no_push,
+            force=args.force,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    return 0
+
+
 def cmd_backtest(args) -> int:
     with Storage() as storage:
         max_date = args.trade_date or storage._conn.execute(
@@ -294,6 +313,9 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("monitor-entry", help="盘中待入场确认与即时推送")
     p.add_argument("--trade-date", help="指定交易日（仅测试/补跑）")
     p.add_argument("--no-push", action="store_true")
+    p = sub.add_parser("tail-review", help="14:50 热门股尾盘复评与模拟持仓退出")
+    p.add_argument("--no-push", action="store_true")
+    p.add_argument("--force", action="store_true")
     p = sub.add_parser("backtest", help="回测与基线对比")
     p.add_argument("--trade-date")
     p.add_argument("--train-days", type=int, default=400)
@@ -313,6 +335,7 @@ def main(argv: list[str] | None = None) -> int:
         "health": cmd_health,
         "track-outcomes": cmd_track_outcomes,
         "monitor-entry": cmd_monitor_entry,
+        "tail-review": cmd_tail_review,
         "backtest": cmd_backtest,
         "hot-fixture-import": cmd_hot_fixture_import,
     }[args.job](args)

@@ -93,7 +93,7 @@ cd /home/ubuntu/market-strategy-system
   `/jckx/` 带 proxy_redirect + sub_filter 修正登录表单）；
   `0.0.0.0:80`（ACME+跳转）；WireGuard `10.66.0.1:80`（JCKX 根路径仅内网）
 - 会话：10 年（`JCKX_SESSION_MAX_AGE=315360000`），SameSite=Lax，Secure（HTTPS）
-- cron（ubuntu）：23:00 nightly、23:08 health、23:15 track-outcomes、
+- cron（ubuntu）：14:50 tail-review、23:00 nightly、23:08 health、23:15 track-outcomes、
   周六 02:00 train、周六 03:00 backtest、auth 看门狗每 5 分钟
 - 证书续期：cron `17 */6 * * *` certbot renew + reload nginx；webroot 公网 80
 

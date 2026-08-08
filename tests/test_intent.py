@@ -329,7 +329,7 @@ def test_defensive_universe_cannot_bypass_common_hard_filters():
             frame["amount"] = 10.0
         frames.append(frame)
     basics = _basics(*codes)
-    basics.loc[basics["ts_code"] == codes[2], "circ_mv"] = 500_000.0
+    basics.loc[basics["ts_code"] == codes[2], "circ_mv"] = 499_000.0
     out = defensive_universe(
         pd.concat(frames, ignore_index=True),
         basics,

@@ -115,7 +115,7 @@ def test_intraday_monitor_activates_and_pushes_once(tmp_path):
     storage.close()
 
 
-def test_intraday_monitor_closes_untriggered_without_push(tmp_path):
+def test_intraday_monitor_keeps_untriggered_pending_before_cutoff(tmp_path):
     storage = Storage(tmp_path / "intraday-not-filled.db")
     _pending(storage)
     pusher = FakePusher()
@@ -128,8 +128,29 @@ def test_intraday_monitor_closes_untriggered_without_push(tmp_path):
         minute_fetcher=lambda _code, _day: _not_filled_minutes(),
     )
 
-    assert result["resolution"] == {"activated": 0, "not_triggered": 1}
+    assert result["resolution"] == {"activated": 0, "not_triggered": 0}
     assert pusher.messages == []
+    row = storage._conn.execute(
+        "SELECT status, close_reason FROM tracking_position"
+    ).fetchone()
+    assert row["status"] == "pending_entry"
+    assert row["close_reason"] is None
+    storage.close()
+
+
+def test_intraday_monitor_closes_untriggered_at_cutoff(tmp_path):
+    storage = Storage(tmp_path / "intraday-cutoff.db")
+    _pending(storage)
+
+    result = monitor_pending_entries(
+        storage,
+        trade_date="20260806",
+        now=datetime(2026, 8, 6, 10, 15),
+        push=False,
+        minute_fetcher=lambda _code, _day: _not_filled_minutes(),
+    )
+
+    assert result["resolution"] == {"activated": 0, "not_triggered": 1}
     row = storage._conn.execute(
         "SELECT status, close_reason FROM tracking_position"
     ).fetchone()
@@ -150,7 +171,8 @@ def test_intraday_monitor_waits_until_fifteen_minutes(tmp_path):
         minute_fetcher=lambda _code, _day: _minutes(),
     )
 
-    assert result["status"] == "waiting"
+    assert result["status"] == "ok"
+    assert result["resolution"] == {"activated": 0, "not_triggered": 0}
     assert storage.tracked_or_pending_codes() == {"600001.SH"}
     assert pusher.messages == []
     storage.close()

@@ -60,8 +60,8 @@ def monitor_pending_entries(
 ) -> dict[str, Any]:
     current = now or now_cst()
     target = trade_date or current.strftime("%Y%m%d")
-    if trade_date is None and current.time() < time(9, 45):
-        return {"status": "waiting", "trade_date": target, "reason": "before_09_45"}
+    if trade_date is None and current.time() < time(9, 35):
+        return {"status": "waiting", "trade_date": target, "reason": "before_09_35"}
     if trade_date is None and current.time() > time(15, 10):
         return {"status": "closed", "trade_date": target, "reason": "after_market"}
 
@@ -77,6 +77,8 @@ def monitor_pending_entries(
             "stk_auction", {"ts_code": code, "trade_date": day, "ts_type": "STK"}
         )
     counts = {"filled": 0, "not_filled": 0, "canceled": 0, "no_data": 0}
+    confirm_cutoff = time.fromisoformat(config.env_str("ENTRY_CONFIRM_CUTOFF", "10:15"))
+    cutoff_reached = current.time() >= confirm_cutoff
     auction_observed = 0
     for record in records:
         code = str(record.get("entity") or "")
@@ -87,6 +89,13 @@ def monitor_pending_entries(
             except Exception:  # noqa: BLE001
                 auction_rows = []
         rows = fetcher(code, target)
+        if target == current.strftime("%Y%m%d"):
+            current_hhmm = current.strftime("%H:%M")
+            rows = [
+                row
+                for row in rows
+                if str(row.get("trade_time") or "")[11:16] <= current_hhmm
+            ]
         if rows:
             storage.upsert_minute_bars(rows)
         previous = storage._conn.execute(
@@ -114,8 +123,14 @@ def monitor_pending_entries(
             ).strip("; ")
             auction_observed += 1
         counts[result["verdict"]] = counts.get(result["verdict"], 0) + 1
-        if result["verdict"] != "no_data":
+        if result["verdict"] in {"filled", "canceled"} or (
+            cutoff_reached and result["verdict"] == "not_filled"
+        ):
             storage.save_execution_replay(result)
+        elif cutoff_reached and result["verdict"] == "no_data":
+            storage.save_execution_replay(
+                {**result, "verdict": "not_filled", "reason": "确认截止时仍无足够分钟数据"}
+            )
 
     resolution = storage.resolve_pending_tracking_entries(target)
     alerts = storage.unalerted_entries(target)
